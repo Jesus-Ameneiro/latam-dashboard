@@ -246,9 +246,15 @@ st.markdown(f"""
   .stApp {{ background-color: {BG} !important; }}
   .main .block-container {{ padding: 1rem 2rem 2rem; max-width: 1440px; }}
   #MainMenu, footer, header {{ visibility: hidden; }}
-  [data-testid="stFileUploaderDropzone"] {{ display: none !important; }}
+  /* Keep the Browse button visible — only hide the drag-and-drop instruction text */
   [data-testid="stFileUploaderDropzoneInstructions"] {{ display: none !important; }}
-  [data-testid="stFileUploader"] > section {{ padding: 0 !important; }}
+  [data-testid="stFileUploaderDropzone"] {{
+      border: 1px dashed {BORD} !important;
+      border-radius: 8px !important;
+      padding: 4px 8px !important;
+      min-height: 0 !important;
+      background: transparent !important;
+  }}
   [data-testid="stVerticalBlockBorderWrapper"] {{
       border: 1px solid {BORD} !important;
       border-radius: 14px !important;

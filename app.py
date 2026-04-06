@@ -469,7 +469,7 @@ if not months_avail:
     t = datetime.today()
     months_avail = [{"year": t.year, "month": t.month, "label": t.strftime("%B %Y")}]
 
-ctl1, ctl2, ctl3, ctl4 = st.columns([2, 2, 1.6, 3])
+ctl1, ctl2, ctl3, ctl4 = st.columns([2.2, 2.2, 1.2, 3])
 
 with ctl1:
     sel_m_lbl = st.selectbox("Month", [m["label"] for m in months_avail],
@@ -485,9 +485,9 @@ with ctl2:
 
 with ctl3:
     uploaded = st.file_uploader(
-        "📂 Load data", type=["csv","xlsx","xls","tsv"],
+        "upload", type=["csv","xlsx","xls","tsv"],
         accept_multiple_files=True, key="uploader",
-        label_visibility="visible",
+        label_visibility="collapsed",
         help="Upload your wide-format Excel/CSV export. Multiple files merge automatically.",
     )
     if uploaded:

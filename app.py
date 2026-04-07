@@ -406,13 +406,6 @@ def fetch_from_github(show_spinner=True):
     return True
 
 # ──────────────────────────────────────────────────────────────────────────────
-# DETECT THEME-ONLY RERUN  (skip all data operations if only theme changed)
-# ──────────────────────────────────────────────────────────────────────────────
-_theme_just_changed = (st.session_state._prev_dark is not None and
-                       st.session_state._prev_dark != dark)
-st.session_state._prev_dark = dark
-
-# ──────────────────────────────────────────────────────────────────────────────
 # PENDING FETCH  (triggered by tab switch — skipped on theme-only reruns)
 # ──────────────────────────────────────────────────────────────────────────────
 if st.session_state._pending_fetch and not _theme_just_changed:
@@ -565,6 +558,11 @@ def generate_pdf(tab_key, cfg, tq, total, gap, pct, groups, invs, w_days,
 # THEME
 # ──────────────────────────────────────────────────────────────────────────────
 dark = st.session_state.dark
+
+# Detect theme-only reruns — skip data operations if only theme changed
+_theme_just_changed = (st.session_state._prev_dark is not None and
+                       st.session_state._prev_dark != dark)
+st.session_state._prev_dark = dark
 BG   = "#1A1614" if dark else "#FEF9F5"
 CARD = "#242120" if dark else "#FFFFFF"
 BORD = "#3D3532" if dark else "#FED7AA"

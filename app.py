@@ -409,6 +409,7 @@ def fetch_from_github(show_spinner=True):
 # ──────────────────────────────────────────────────────────────────────────────
 if st.session_state._pending_fetch:
     st.session_state._pending_fetch = False
+    st.session_state._wk_month_key = None   # force week to reset to current week
     fetch_from_github(show_spinner=False)
 
 # First-load auto-fetch
@@ -764,7 +765,8 @@ with c2:
         else f"Week of {w['label']}"
         for w in weeks
     ]
-    month_key = f"{sel_month['year']}-{sel_month['month']}"
+    # Include tab in key so switching tabs always resets week to current
+    month_key = f"{sel_month['year']}-{sel_month['month']}-{st.session_state.tab}"
     if st.session_state._wk_month_key != month_key:
         st.session_state._wk_month_key = month_key
         st.session_state["sel_week"]   = w_disp[current_week_idx(weeks)]

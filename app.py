@@ -483,7 +483,7 @@ def generate_pdf(tab_key, cfg, tq, total, gap, pct, groups, invs, w_days,
     for i,g in enumerate(groups):
         left=max(0,g["quota"]-g["done"]); pg=min(100,round(g["done"]/g["quota"]*100)) if g["quota"] else 0
         status="COMPLETE" if left==0 else ("ON TRACK" if g["done"]/max(g["quota"],1)>=0.6 else "BEHIND")
-        tr([g["label"] + (" *" if sq else ""), g["quota"],g["done"],left,f"{pg}%",status],[72,18,18,24,22,32],
+        tr([safe(g["label"]), g["quota"],g["done"],left,f"{pg}%",status],[72,18,18,24,22,32],
            ['L','C','C','C','C','C'],even=i%2==0)
     pdf.set_font("Helvetica","B",8); pdf.set_text_color(*CO)
     for v,w,a in zip(["TOTAL",str(tq),str(sum(g["done"] for g in groups)),str(gap),f"{pct}%",""],

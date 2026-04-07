@@ -98,6 +98,7 @@ for k, v in [
     ("_init_fetch",        False),  # guard: auto-fetch only once per session
     ("_pending_fetch",   False),
     ("_wk_month_key",    None),
+    ("_prev_dark",       None),   # detects theme-only reruns
 ]:
     if k not in st.session_state:
         st.session_state[k] = v
@@ -405,9 +406,16 @@ def fetch_from_github(show_spinner=True):
     return True
 
 # ──────────────────────────────────────────────────────────────────────────────
-# PENDING FETCH  (triggered by tab switch or first load)
+# DETECT THEME-ONLY RERUN  (skip all data operations if only theme changed)
 # ──────────────────────────────────────────────────────────────────────────────
-if st.session_state._pending_fetch:
+_theme_just_changed = (st.session_state._prev_dark is not None and
+                       st.session_state._prev_dark != dark)
+st.session_state._prev_dark = dark
+
+# ──────────────────────────────────────────────────────────────────────────────
+# PENDING FETCH  (triggered by tab switch — skipped on theme-only reruns)
+# ──────────────────────────────────────────────────────────────────────────────
+if st.session_state._pending_fetch and not _theme_just_changed:
     st.session_state._pending_fetch = False
     st.session_state._wk_month_key = None   # force week to reset to current week
     fetch_from_github(show_spinner=False)

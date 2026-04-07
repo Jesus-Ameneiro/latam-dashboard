@@ -4,12 +4,6 @@ import plotly.graph_objects as go
 from datetime import datetime, date, timedelta
 import re, io, copy, unicodedata, requests
 
-try:
-    from fpdf import FPDF
-    PDF_OK = True
-except ImportError:
-    PDF_OK = False
-
 # ──────────────────────────────────────────────────────────────────────────────
 # PAGE CONFIG
 # ──────────────────────────────────────────────────────────────────────────────
@@ -842,7 +836,7 @@ quota_from_summary=bool(st.session_state.week_quotas.get(sel_week["start"]))
 # ──────────────────────────────────────────────────────────────────────────────
 src_tag=(f' <span style="font-size:9px;color:{GRN};background:#DCFCE7;'
          f'padding:1px 6px;border-radius:10px">★ summary</span>' if quota_from_summary else "")
-mrow_l,mrow_r=st.columns([7,1])
+mrow_l = st.columns([1])[0]
 with mrow_l:
     st.markdown(f"""
     <div style="display:flex;justify-content:flex-end;align-items:center;gap:28px;padding:8px 0 12px">
@@ -863,14 +857,7 @@ with mrow_l:
         <div style="font-size:10px;color:{TX2}">{sel_week["label"]}, {sel_month["year"]}</div>
       </div>
     </div>""", unsafe_allow_html=True)
-with mrow_r:
-    if PDF_OK and has_data:
-        pdf_bytes=generate_pdf(st.session_state.tab,cfg,tq,total,gap,pct,
-                               groups,invs,w_days,by_country,by_inv_stat,
-                               sel_week,sel_month,quota_from_summary)
-        st.download_button("📄 PDF",data=pdf_bytes,
-                           file_name=f"ruvixx_{st.session_state.tab.lower()}_{sel_week['start']}.pdf",
-                           mime="application/pdf",use_container_width=True,type="secondary")
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # MAIN ROW

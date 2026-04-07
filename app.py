@@ -403,12 +403,17 @@ def fetch_from_github(show_spinner=True):
     return True
 
 # ──────────────────────────────────────────────────────────────────────────────
-# AUTO-FETCH ON FIRST LOAD
+# AUTO-FETCH ON FIRST LOAD  (wrapped so a failure never prevents UI from loading)
 # ──────────────────────────────────────────────────────────────────────────────
-if not st.session_state._init_fetch and GITHUB_TOKEN and GITHUB_REPO:
-    st.session_state._init_fetch = True
-    fetch_from_github(show_spinner=False)
-    st.rerun()
+if not st.session_state._init_fetch:
+    st.session_state._init_fetch = True   # set first so a crash doesn't loop
+    if GITHUB_TOKEN and GITHUB_REPO:
+        try:
+            ok = fetch_from_github(show_spinner=False)
+            if ok:
+                st.rerun()
+        except Exception as _e:
+            st.warning(f"Auto-fetch failed on startup: {_e}. Press 🔄 Refresh to retry.")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # PDF GENERATOR

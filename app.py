@@ -2,17 +2,19 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime, date, timedelta
-import re, io, copy
+import re, io, copy, unicodedata
+
+try:
+    from fpdf import FPDF
+    PDF_OK = True
+except ImportError:
+    PDF_OK = False
 
 # ──────────────────────────────────────────────────────────────────────────────
 # PAGE CONFIG
 # ──────────────────────────────────────────────────────────────────────────────
-st.set_page_config(
-    page_title="Ruvixx · Case Investigation",
-    page_icon="🔶",
-    layout="wide",
-    initial_sidebar_state="collapsed",
-)
+st.set_page_config(page_title="Ruvixx · Case Investigation", page_icon="🔶",
+                   layout="wide", initial_sidebar_state="collapsed")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # CONSTANTS
@@ -20,8 +22,7 @@ st.set_page_config(
 ORG, GRN, RED = "#F97316", "#16A34A", "#EF4444"
 
 COUNTRY_FIX = {
-    "domican republic": "Dominican Republic",
-    "dominican repbulic": "Dominican Republic",
+    "domican republic": "Dominican Republic", "dominican repbulic": "Dominican Republic",
     "belice": "Belize", "bolivar": "Bolivia", "ecuardor": "Ecuador",
 }
 COUNTRY_PILLS = {
@@ -37,29 +38,27 @@ MONTH_MAP = {m: i+1 for i, m in enumerate([
     "july","august","september","october","november","december",
 ])}
 DISQ_RE = re.compile(
-    r"\b(disqualif|reject|rjected|duplicad[ao]?|repeated|"
-    r"duplicate\s+of|related|case\s+related|already\s+contacted|"
-    r"entity\s+already|caso\s+relacionado|caso\s+duplicado)\b",
-    re.IGNORECASE,
+    r"\b(disqualif|reject|rjected|duplicad[ao]?|repeated|duplicate\s+of|"
+    r"related|case\s+related|already\s+contacted|entity\s+already|"
+    r"caso\s+relacionado|caso\s+duplicado)\b", re.IGNORECASE,
 )
 
 # ──────────────────────────────────────────────────────────────────────────────
-# DEFAULT REGION CONFIG
+# DEFAULT REGION CONFIG  (Colombia + Ecuador → CS)
 # ──────────────────────────────────────────────────────────────────────────────
 DEFAULT_REGIONS = {
     "MCC": {
         "name": "México Central Caribe", "contact": "Tatiana Romero",
         "groups": [
-            {"label": "Mexico",                  "countries": ["Mexico"],                                   "quota": 25},
-            {"label": "CR + Dom. Rep. + Panama",  "countries": ["Costa Rica","Dominican Republic","Panama"], "quota": 25},
-            {"label": "Nicaragua",                "countries": ["Nicaragua"],                                "quota": 1},
-            {"label": "Guatemala",                "countries": ["Guatemala"],                                "quota": 1},
-            {"label": "El Salvador",              "countries": ["El Salvador"],                              "quota": 1},
-            {"label": "Honduras",                 "countries": ["Honduras"],                                 "quota": 1},
-            {"label": "Belize",                   "countries": ["Belize"],                                   "quota": 1},
+            {"label": "Mexico",                 "countries": ["Mexico"],                                   "quota": 25},
+            {"label": "CR + Dom. Rep. + Panama", "countries": ["Costa Rica","Dominican Republic","Panama"], "quota": 25},
+            {"label": "Nicaragua",               "countries": ["Nicaragua"],                                "quota": 1},
+            {"label": "Guatemala",               "countries": ["Guatemala"],                                "quota": 1},
+            {"label": "El Salvador",             "countries": ["El Salvador"],                              "quota": 1},
+            {"label": "Honduras",                "countries": ["Honduras"],                                 "quota": 1},
+            {"label": "Belize",                  "countries": ["Belize"],                                   "quota": 1},
         ],
-        "daily_min": 5, "daily_ideal": 8, "weekly_min": 25, "weekly_ideal": 40,
-        "support": ["Luis"],
+        "daily_min": 5, "daily_ideal": 8, "weekly_min": 25, "weekly_ideal": 40, "support": ["Luis"],
     },
     "CS": {
         "name": "Cono Sur", "contact": "Ignacio Duce",
@@ -72,36 +71,37 @@ DEFAULT_REGIONS = {
             {"label": "Paraguay",           "countries": ["Paraguay"],           "quota": 5},
             {"label": "Uruguay",            "countries": ["Uruguay"],            "quota": 5},
         ],
-        "daily_min": 5, "daily_ideal": 8, "weekly_min": 25, "weekly_ideal": 40,
-        "support": [],
+        "daily_min": 5, "daily_ideal": 8, "weekly_min": 25, "weekly_ideal": 40, "support": [],
     },
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
 # SESSION STATE
 # ──────────────────────────────────────────────────────────────────────────────
-EMPTY_DF = pd.DataFrame(columns=["date","case_id","country","investigator","region","source_file"])
+# Data stores NO region — computed dynamically from config at render time.
+EMPTY_DF = pd.DataFrame(columns=["date","case_id","country","investigator","source_file"])
 
 for k, v in [
-    ("data",              EMPTY_DF),
-    ("files",             []),           # list of loaded filenames
-    ("tab",               "MCC"),
-    ("dark",              False),
-    ("rcfg",              copy.deepcopy(DEFAULT_REGIONS)),
-    ("week_quotas",       {}),           # {week_start: {region: {total, groups}}}
-    ("summary_file_weeks",{}),           # {filename: [week_start, ...]}
-    ("show_files_panel",  False),
+    ("data",               EMPTY_DF),
+    ("files",              []),
+    ("tab",                "MCC"),
+    ("dark",               False),
+    ("rcfg",               copy.deepcopy(DEFAULT_REGIONS)),
+    ("week_quotas",        {}),
+    ("summary_file_weeks", {}),
+    ("show_files_panel",   False),
+    ("_wk_month_key",      None),   # track month changes for week auto-select
 ]:
     if k not in st.session_state:
         st.session_state[k] = v
 
 # ──────────────────────────────────────────────────────────────────────────────
-# REGION HELPERS
+# REGION HELPERS  (always read live config)
 # ──────────────────────────────────────────────────────────────────────────────
 def get_all_assigned():
     return {c: (rk, gi)
-            for rk, rcfg in st.session_state.rcfg.items()
-            for gi, g in enumerate(rcfg["groups"])
+            for rk, rc in st.session_state.rcfg.items()
+            for gi, g in enumerate(rc["groups"])
             for c in g["countries"]}
 
 def get_region(country):
@@ -110,17 +110,31 @@ def get_region(country):
 def total_quota(rk):
     return sum(g["quota"] for g in st.session_state.rcfg[rk]["groups"])
 
-def effective_quota(rk, sel_week):
-    t = st.session_state.week_quotas.get(sel_week["start"], {}).get(rk, {}).get("total", 0)
+def effective_quota(rk, week_start):
+    t = st.session_state.week_quotas.get(week_start, {}).get(rk, {}).get("total", 0)
     return t if t > 0 else total_quota(rk)
 
 def region_pills(rk):
-    countries = [c for g in st.session_state.rcfg[rk]["groups"] for c in g["countries"]]
-    return [COUNTRY_PILLS.get(c, c[:2].upper()) for c in countries]
+    return [COUNTRY_PILLS.get(c, c[:2].upper())
+            for g in st.session_state.rcfg[rk]["groups"] for c in g["countries"]]
+
+def with_region(df):
+    """Add/refresh 'region' column from current config. Always recompute."""
+    if df.empty:
+        return df.assign(region=pd.Series(dtype=str))
+    am = get_all_assigned()
+    out = df.copy()
+    out["region"] = out["country"].map(lambda c: am.get(c, (None,None))[0])
+    return out
 
 # ──────────────────────────────────────────────────────────────────────────────
-# DATA HELPERS
+# TEXT / DATE HELPERS
 # ──────────────────────────────────────────────────────────────────────────────
+def safe(s):
+    """Latin-1 safe string for fpdf (normalise accents to ASCII)."""
+    n = unicodedata.normalize('NFKD', str(s or ""))
+    return n.encode('latin-1', 'ignore').decode('latin-1')
+
 def norm_country(c):
     if not c or str(c).strip() in ("","nan","None"): return ""
     t = str(c).strip()
@@ -132,10 +146,9 @@ def is_disq(qa):
 def parse_date_val(val):
     if val is None: return None
     try:
-        if isinstance(val, pd.Timestamp):
-            return val.strftime("%Y-%m-%d") if pd.notna(val) else None
-        if isinstance(val, datetime): return val.strftime("%Y-%m-%d")
-        if isinstance(val, date):     return datetime(val.year, val.month, val.day).strftime("%Y-%m-%d")
+        if isinstance(val, pd.Timestamp): return val.strftime("%Y-%m-%d") if pd.notna(val) else None
+        if isinstance(val, datetime):     return val.strftime("%Y-%m-%d")
+        if isinstance(val, date):         return datetime(val.year, val.month, val.day).strftime("%Y-%m-%d")
     except Exception: pass
     s = str(val).strip()
     if not s or s in ("nan","None","NaT","NaN",""): return None
@@ -144,12 +157,10 @@ def parse_date_val(val):
         a, b, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
         if not (2020 <= y <= 2035): return None
         mo, d = (b, a) if a > 12 else (a, b)
-        if 1 <= mo <= 12 and 1 <= d <= 31:
-            return f"{y}-{mo:02d}-{d:02d}"
+        if 1 <= mo <= 12 and 1 <= d <= 31: return f"{y}-{mo:02d}-{d:02d}"
     try:
         dt = pd.to_datetime(s, dayfirst=False, errors="coerce")
-        if pd.notna(dt) and 2020 <= dt.year <= 2035:
-            return dt.strftime("%Y-%m-%d")
+        if pd.notna(dt) and 2020 <= dt.year <= 2035: return dt.strftime("%Y-%m-%d")
     except Exception: pass
     return None
 
@@ -168,6 +179,15 @@ def get_weeks(year, month):
         cur += timedelta(7)
     return weeks
 
+def current_week_idx(weeks):
+    """Return index of the week containing today; fallback to last week."""
+    today_str = date.today().strftime("%Y-%m-%d")
+    for i, w in enumerate(weeks):
+        if w["start"] <= today_str <= w["end"]:
+            return i
+    # If today is not in any week (e.g. looking at a past month), return last
+    return max(0, len(weeks) - 1)
+
 def fmt_day(ds):
     d = datetime.strptime(ds, "%Y-%m-%d")
     return f"{d.strftime('%b')} {d.day}"
@@ -185,15 +205,23 @@ def badge_for(total, wmin, wideal):
     return "Below min", "#FEE2E2", RED
 
 # ──────────────────────────────────────────────────────────────────────────────
-# WIDE-FORMAT DETAIL PARSER
+# FILE PARSERS
 # ──────────────────────────────────────────────────────────────────────────────
 def parse_wide(df_raw, source_file=""):
+    """
+    Extract cases from wide-format spreadsheet.
+    Stores country (no region — computed dynamically).
+    Dedup key: (case_id, investigator) — same investigator can't count same case twice.
+    Cases with unrecognised countries are kept but marked; sidebar warns about them.
+    """
     rows = df_raw.values.tolist()
     if len(rows) < 2: return EMPTY_DF.copy()
     headers = [str(h).strip() if h is not None and str(h) != "nan" else "" for h in rows[0]]
     date_positions = [i for i, h in enumerate(headers) if h == "Date"]
+
     records, seen = [], set()
-    skipped_disq = skipped_no_region = 0
+    skip_disq = skip_blank = 0
+
     for dp in date_positions:
         for row in rows[1:]:
             try:
@@ -202,111 +230,119 @@ def parse_wide(df_raw, source_file=""):
                 ctr = norm_country(row[dp+3]   if dp+3 < len(row) else "")
                 inv = str(row[dp+4] if dp+4 < len(row) else "").strip()
                 qa  = str(row[dp+5] if dp+5 < len(row) else "")
-                if not ds or not cid or not ctr or not inv or inv in ("nan","None",""): continue
-                if is_disq(qa): skipped_disq += 1; continue
-                region = get_region(ctr)
-                if not region: skipped_no_region += 1; continue
+
+                if not ds or not cid or not ctr or not inv or inv in ("nan","None",""):
+                    skip_blank += 1; continue
+                if is_disq(qa):
+                    skip_disq += 1; continue
+
                 key = f"{cid}|{inv}"
                 if key in seen: continue
                 seen.add(key)
                 records.append({"date": ds, "case_id": cid, "country": ctr,
-                                 "investigator": inv, "region": region,
-                                 "source_file": source_file})
-            except Exception: continue
+                                 "investigator": inv, "source_file": source_file})
+            except Exception:
+                continue
+
     if not records:
-        st.warning(
-            f"⚠️ No valid cases in **{source_file}**. "
-            f"Filtered: disqualified/rejected **{skipped_disq}**, "
-            f"unrecognised country **{skipped_no_region}**. "
-            f"Check that a **'Date'** column exists in row 1.")
+        st.warning(f"⚠️ **{source_file}**: 0 valid cases. "
+                   f"Filtered — disqualified: {skip_disq}, blank/incomplete: {skip_blank}. "
+                   f"Check that a **'Date'** column exists in row 1.")
         return EMPTY_DF.copy()
+
+    st.toast(f"✅ {source_file} — {len(records)} cases loaded", icon="📂")
     return pd.DataFrame(records)
 
-# ──────────────────────────────────────────────────────────────────────────────
-# SUMMARY PARSER
-# ──────────────────────────────────────────────────────────────────────────────
-def _next_int(row, start, look=5):
-    for i in range(start, min(start + look, len(row))):
+
+def _next_int(row, start, look=6):
+    for i in range(start, min(start+look, len(row))):
         try:
             v = int(float(str(row[i]).strip()))
             if v > 0: return v
         except Exception: pass
     return None
 
-def _week_start_date(week_num, year, month):
-    weeks = get_weeks(year, month)
-    idx   = week_num - 1
-    return weeks[idx]["start"] if 0 <= idx < len(weeks) else None
 
 def parse_summary_csv(df_raw, filename):
     month_num = next((v for k, v in MONTH_MAP.items() if k in filename.lower()), None)
     if not month_num:
-        st.warning(f"Cannot determine month from **{filename}** — include month name in filename.")
+        st.warning(f"⚠️ Cannot determine month from **{filename}** — include month name in filename.")
         return
     year = (int(st.session_state.data["date"].str[:4].mode()[0])
             if not st.session_state.data.empty else datetime.today().year)
+
     rows = [[str(c).strip() if c is not None and str(c) not in ("nan","None","NaT","") else ""
              for c in row] for row in df_raw.values.tolist()]
+
     cur_week = in_meta = None
     mcc_col = cs_col = None
     loaded_weeks = []
+
     for row in rows:
         joined = " ".join(row).lower()
         for cell in row:
             wm = re.match(r"^week\s+(\d+)$", cell.lower().strip())
             if wm:
-                cur_week = int(wm.group(1)); in_meta = False
-                mcc_col = cs_col = None; break
+                cur_week = int(wm.group(1)); in_meta = False; mcc_col = cs_col = None; break
         if cur_week is None: continue
+
         if "meta del batch" in joined:
             pos = [i for i, c in enumerate(row) if "meta del batch" in c.lower()]
             mcc_col = pos[0] if pos else None
             cs_col  = pos[1] if len(pos) > 1 else None
             in_meta = True; continue
         if not in_meta: continue
+        if "remaining for goal" in joined: continue
+
         if "target batch" in joined:
             for ci, cell in enumerate(row):
                 if "target batch" not in cell.lower(): continue
-                val = _next_int(row, ci + 1)
+                val = _next_int(row, ci+1)
                 if not val: continue
                 if mcc_col is not None and cs_col is not None:
                     region = "MCC" if ci < cs_col else "CS"
                 else:
-                    ws_ = _week_start_date(cur_week, year, month_num)
+                    wst_ = _week_start(cur_week, year, month_num)
                     region = ("CS" if st.session_state.week_quotas
-                              .get(ws_, {}).get("MCC", {}).get("total", 0) > 0 else "MCC")
-                ws = _week_start_date(cur_week, year, month_num)
-                if ws:
-                    st.session_state.week_quotas.setdefault(ws, {"MCC": {"total":0,"groups":{}}, "CS": {"total":0,"groups":{}}})
-                    st.session_state.week_quotas[ws][region]["total"] = val
+                              .get(wst_, {}).get("MCC", {}).get("total", 0) > 0 else "MCC")
+                wst = _week_start(cur_week, year, month_num)
+                if wst:
+                    st.session_state.week_quotas.setdefault(
+                        wst, {"MCC":{"total":0,"groups":{}},"CS":{"total":0,"groups":{}}})
+                    st.session_state.week_quotas[wst][region]["total"] = val
                     st.session_state.summary_file_weeks.setdefault(filename, [])
-                    if ws not in st.session_state.summary_file_weeks[filename]:
-                        st.session_state.summary_file_weeks[filename].append(ws)
-                    if ws not in loaded_weeks: loaded_weeks.append(ws)
+                    if wst not in st.session_state.summary_file_weeks[filename]:
+                        st.session_state.summary_file_weeks[filename].append(wst)
+                    if wst not in loaded_weeks: loaded_weeks.append(wst)
             continue
-        if "remaining for goal" in joined: continue
-        for col_idx, region in [(mcc_col, "MCC"), (cs_col, "CS")]:
+
+        for col_idx, region in [(mcc_col,"MCC"),(cs_col,"CS")]:
             if col_idx is None or col_idx >= len(row): continue
             name = row[col_idx].strip()
             if not name or "meta del batch" in name.lower(): continue
-            val  = _next_int(row, col_idx + 1)
+            val  = _next_int(row, col_idx+1)
             if val:
-                ws = _week_start_date(cur_week, year, month_num)
-                if ws:
-                    st.session_state.week_quotas.setdefault(ws, {"MCC":{"total":0,"groups":{}},"CS":{"total":0,"groups":{}}})
-                    st.session_state.week_quotas[ws][region]["groups"][name] = val
+                wst = _week_start(cur_week, year, month_num)
+                if wst:
+                    st.session_state.week_quotas.setdefault(
+                        wst, {"MCC":{"total":0,"groups":{}},"CS":{"total":0,"groups":{}}})
+                    st.session_state.week_quotas[wst][region]["groups"][name] = val
+
     if loaded_weeks:
         st.toast(f"✅ {filename} — quotas for {len(loaded_weeks)} week(s)", icon="📋")
     else:
         st.warning(f"⚠️ No quota data found in **{filename}**.")
 
-# ──────────────────────────────────────────────────────────────────────────────
-# FILE I/O
-# ──────────────────────────────────────────────────────────────────────────────
+
+def _week_start(week_num, year, month):
+    weeks = get_weeks(year, month)
+    return weeks[week_num-1]["start"] if 0 <= week_num-1 < len(weeks) else None
+
+
 def read_file(f):
     name = f.name.lower()
     try:
-        if name.endswith((".xlsx", ".xls")):
+        if name.endswith((".xlsx",".xls")):
             return pd.read_excel(f, header=None, engine="openpyxl")
         content = f.read(); f.seek(0)
         text = content.decode("utf-8", errors="replace")
@@ -316,15 +352,13 @@ def read_file(f):
         st.error(f"Could not read **{f.name}**: {e}")
         return pd.DataFrame()
 
-def process_uploaded_files(file_list):
-    """Process a list of uploaded Streamlit file objects."""
+
+def process_files(file_list):
     added = False
     for f in file_list:
-        if f.name in st.session_state.files:
-            continue
+        if f.name in st.session_state.files: continue
         raw = read_file(f)
-        if raw.empty:
-            continue
+        if raw.empty: continue
         if "summary" in f.name.lower():
             parse_summary_csv(raw, f.name)
             st.session_state.files.append(f.name)
@@ -332,15 +366,15 @@ def process_uploaded_files(file_list):
             parsed = parse_wide(raw, source_file=f.name)
             if not parsed.empty:
                 combined = pd.concat([st.session_state.data, parsed], ignore_index=True)
+                # Dedup across files: (case_id, investigator) unique
                 combined = combined.drop_duplicates(subset=["case_id","investigator"], keep="first")
-                st.session_state.data  = combined
+                st.session_state.data = combined
                 st.session_state.files.append(f.name)
                 added = True
-                st.toast(f"✅ {f.name} — {len(parsed)} cases", icon="📂")
     return added
 
+
 def remove_file(fname):
-    """Remove a file and its associated data from session state."""
     if "summary" in fname.lower():
         for ws in st.session_state.summary_file_weeks.get(fname, []):
             st.session_state.week_quotas.pop(ws, None)
@@ -349,12 +383,245 @@ def remove_file(fname):
         if "source_file" in st.session_state.data.columns:
             st.session_state.data = (
                 st.session_state.data[st.session_state.data["source_file"] != fname]
-                .reset_index(drop=True)
-            )
+                .reset_index(drop=True))
     if fname in st.session_state.files:
         st.session_state.files.remove(fname)
     if not st.session_state.files:
         st.session_state.show_files_panel = False
+
+# ──────────────────────────────────────────────────────────────────────────────
+# PDF GENERATOR
+# ──────────────────────────────────────────────────────────────────────────────
+def generate_pdf(tab_key, cfg, tq, total, gap, pct, groups, invs, w_days,
+                 by_country, by_inv_stat, sel_week, sel_month, quota_from_summary):
+    if not PDF_OK:
+        return None
+
+    # Color palette
+    CO  = (249,115,22)   # orange
+    CG  = (22,163,74)    # green
+    CR  = (239,68,68)    # red
+    CD  = (28,25,23)     # dark text
+    CGR = (120,113,108)  # gray
+    CL  = (254,243,234)  # light orange bg
+    CW  = (255,255,255)  # white
+    CA  = (249,246,242)  # alt row
+
+    W = 186  # usable width (A4 portrait, 12mm margins)
+
+    pdf = FPDF()
+    pdf.set_margins(12, 12, 12)
+    pdf.set_auto_page_break(auto=True, margin=18)
+
+    # ── helpers ──────────────────────────────────────────────────────────────
+    def page_header():
+        pdf.set_fill_color(*CO)
+        pdf.rect(0, 0, 210, 24, 'F')
+        pdf.set_font("Helvetica", "B", 14)
+        pdf.set_text_color(*CW)
+        pdf.set_xy(12, 5)
+        pdf.cell(W, 8, "RUVIXX  |  Case Investigation Report")
+        pdf.set_font("Helvetica", "", 8)
+        pdf.set_xy(12, 15)
+        pdf.cell(W, 5,
+                 f"{safe(cfg['name'])}  ·  Week of {safe(sel_week['label'])}, "
+                 f"{sel_month['year']}  ·  {safe(cfg['contact'])}")
+        pdf.set_text_color(*CD)
+        pdf.set_y(28)
+
+    def section(title):
+        if pdf.get_y() > 240:
+            pdf.add_page(); page_header(); pdf.ln(2)
+        pdf.set_font("Helvetica", "B", 9)
+        pdf.set_text_color(*CO)
+        pdf.cell(W, 6, safe(title), ln=True)
+        pdf.set_draw_color(*CO)
+        pdf.set_line_width(0.4)
+        y = pdf.get_y()
+        pdf.line(12, y, 198, y)
+        pdf.ln(3)
+        pdf.set_text_color(*CD)
+
+    def th(headers, widths):
+        pdf.set_fill_color(*CO); pdf.set_text_color(*CW)
+        pdf.set_font("Helvetica", "B", 8)
+        for h, w in zip(headers, widths):
+            pdf.cell(w, 7, safe(str(h)), border=0, fill=True, align='C')
+        pdf.ln()
+        pdf.set_text_color(*CD)
+
+    def tr(values, widths, aligns, even=True):
+        pdf.set_fill_color(*(CA if even else CW))
+        pdf.set_font("Helvetica", "", 8)
+        for v, w, a in zip(values, widths, aligns):
+            pdf.cell(w, 6, safe(str(v)), border=0, fill=True, align=a)
+        pdf.ln()
+
+    # ── PAGE 1: Summary ──────────────────────────────────────────────────────
+    pdf.add_page()
+    page_header()
+
+    # Generated timestamp
+    pdf.set_font("Helvetica", "", 7)
+    pdf.set_text_color(*CGR)
+    ts = datetime.now().strftime("%B %d, %Y  %H:%M")
+    pdf.cell(W, 4, f"Generated: {ts}  {'  |  ★ Quotas from summary file' if quota_from_summary else ''}", align='R', ln=True)
+    pdf.ln(4)
+
+    # Summary metrics
+    section("WEEKLY SUMMARY")
+    y0  = pdf.get_y()
+    bw  = 45   # box width
+    bh  = 22
+    x0  = 12
+    gap_x = 2
+    metrics = [
+        ("Cases Generated", str(total), CO),
+        ("Quota Target",    str(tq),    CD),
+        ("Quota Gap",       str(gap),   CR if gap > 0 else CG),
+        ("Progress",        f"{pct}%",  CG if pct >= 100 else (CO if pct >= 70 else CR)),
+    ]
+    for i, (lbl, val, color) in enumerate(metrics):
+        x = x0 + i*(bw+gap_x)
+        pdf.set_fill_color(*CL)
+        pdf.rect(x, y0, bw, bh, 'F')
+        pdf.set_font("Helvetica", "", 7); pdf.set_text_color(*CGR)
+        pdf.set_xy(x+3, y0+3); pdf.cell(bw-6, 4, lbl)
+        pdf.set_font("Helvetica", "B", 16); pdf.set_text_color(*color)
+        pdf.set_xy(x+3, y0+8); pdf.cell(bw-6, 10, val)
+    pdf.set_y(y0 + bh + 7)
+    pdf.set_text_color(*CD)
+
+    # Group breakdown
+    section("BATCH QUOTA — GROUP BREAKDOWN")
+    cols_g = ["Group", "Quota", "Done", "Remaining", "Prog %", "Status"]
+    wids_g = [72, 18, 18, 24, 22, 32]   # Σ = 186
+    algs_g = ['L','C','C','C','C','C']
+    th(cols_g, wids_g)
+    for i, g in enumerate(groups):
+        left    = max(0, g["quota"] - g["done"])
+        pg      = min(100, round(g["done"]/g["quota"]*100)) if g["quota"] else 0
+        status  = "COMPLETE" if left==0 else ("ON TRACK" if g["done"]/max(g["quota"],1)>=0.6 else "BEHIND")
+        tr([g["label"], g["quota"], g["done"], left, f"{pg}%", status], wids_g, algs_g, even=i%2==0)
+    pdf.set_font("Helvetica","B",8); pdf.set_text_color(*CO)
+    pdf.cell(wids_g[0], 6, "TOTAL", fill=False)
+    pdf.cell(wids_g[1], 6, str(tq),   align='C', fill=False)
+    done_total = sum(g["done"] for g in groups)
+    pdf.cell(wids_g[2], 6, str(done_total), align='C', fill=False)
+    pdf.cell(wids_g[3], 6, str(gap), align='C', fill=False)
+    pdf.cell(wids_g[4], 6, f"{pct}%", align='C', fill=False)
+    pdf.ln(10)
+    pdf.set_text_color(*CD)
+
+    # Key highlights
+    section("KEY HIGHLIGHTS")
+    bullet_items = [
+        f"Batch in progress: {total}/{tq} cases generated, {gap} remaining to reach quota.",
+    ]
+    for g in groups:
+        left = max(0, g["quota"] - g["done"])
+        bullet_items.append(
+            f"{safe(g['label'])}: {g['done']}/{g['quota']} "
+            f"({'All complete' if left==0 else f'{left} cases left'})")
+    if invs:
+        top = invs[0]
+        tp  = round(top['total']/total*100) if total else 0
+        bullet_items.append(
+            f"Top investigator: {safe(top['name'])} — {top['total']} cases this week ({tp}%).")
+    pdf.set_font("Helvetica","",8); pdf.set_text_color(*CD)
+    for item in bullet_items:
+        prefix = "    " if item.startswith(" ") else ""
+        pdf.cell(6, 5, chr(149)); pdf.cell(W-6, 5, safe(prefix+item.strip()), ln=True)
+    pdf.ln(2)
+
+    # ── PAGE 2: Investigator Performance ─────────────────────────────────────
+    pdf.add_page()
+    page_header()
+    pdf.ln(2)
+
+    section("INVESTIGATOR PERFORMANCE — DAILY BREAKDOWN")
+    day_hdrs = [safe(wd["label"]) for wd in w_days]
+    cols_i   = ["Investigator", "Role"] + day_hdrs + ["Week", "Month", "Status"]
+    # 30 + 16 + 5×20 + 16 + 16 + 12 = 190 → adjust
+    wids_i   = [30, 15] + [19]*len(w_days) + [15, 15, 12]
+    # Recheck: 30+15+95+15+15+12 = 182 for 5 days, adjust first col to 34
+    wids_i[0] = 34
+    algs_i   = ['L','C'] + ['C']*len(w_days) + ['C','C','C']
+
+    th(cols_i, wids_i)
+    for ri, inv in enumerate(invs):
+        role     = "Support" if inv["support"] else "Investigator"
+        bl, _, _ = (("Support","","") if inv["support"] else
+                    badge_for(inv["total"], cfg["weekly_min"], cfg["weekly_ideal"]))
+        day_vals = [str(inv["by_day"].get(wd["ds"],0) or "—") for wd in w_days]
+        tr([safe(inv["name"]), role] + day_vals + [inv["total"], inv["month_total"], bl],
+           wids_i, algs_i, even=ri%2==0)
+    pdf.ln(6)
+
+    # Daily averages row
+    pdf.set_font("Helvetica","B",8); pdf.set_text_color(*CGR)
+    pdf.cell(wids_i[0]+wids_i[1], 6, "Daily average →", align='R')
+    for wd in w_days:
+        day_total = sum(inv["by_day"].get(wd["ds"],0) for inv in invs)
+        pdf.cell(19, 6, str(day_total), align='C')
+    pdf.ln(8)
+    pdf.set_text_color(*CD)
+
+    # Distribution section
+    section("DISTRIBUTION — CASES BY COUNTRY & INVESTIGATOR")
+
+    half = 88; gx = 10
+    x_L  = 12; x_R = 12 + half + gx
+    y0   = pdf.get_y()
+
+    # Country table header
+    cw_L = [53, 18, 17]  # Σ = 88
+    pdf.set_fill_color(*CO); pdf.set_text_color(*CW); pdf.set_font("Helvetica","B",8)
+    pdf.set_xy(x_L, y0)
+    for h, w in zip(["Country","Cases","%"], cw_L):
+        pdf.cell(w, 7, h, border=0, fill=True, align='C')
+
+    # Investigator table header
+    cw_R = [54, 18, 16]  # Σ = 88
+    pdf.set_xy(x_R, y0)
+    for h, w in zip(["Investigator","Cases","%"], cw_R):
+        pdf.cell(w, 7, h, border=0, fill=True, align='C')
+
+    pdf.set_text_color(*CD)
+    country_list = list(by_country.items())
+    n_rows = max(len(country_list), len(by_inv_stat))
+    y_row  = y0 + 7
+
+    for ri in range(n_rows):
+        fill = CA if ri%2==0 else CW
+        pdf.set_fill_color(*fill); pdf.set_font("Helvetica","",8)
+
+        if ri < len(country_list):
+            country, cnt = country_list[ri]
+            cp = round(cnt/total*100) if total else 0
+            pdf.set_xy(x_L, y_row)
+            pdf.cell(cw_L[0], 6, safe(country), border=0, fill=True, align='L')
+            pdf.cell(cw_L[1], 6, str(cnt),       border=0, fill=True, align='C')
+            pdf.cell(cw_L[2], 6, f"{cp}%",        border=0, fill=True, align='C')
+
+        if ri < len(by_inv_stat):
+            inv_s = by_inv_stat[ri]
+            pdf.set_xy(x_R, y_row)
+            pdf.cell(cw_R[0], 6, safe(inv_s["name"]), border=0, fill=True, align='L')
+            pdf.cell(cw_R[1], 6, str(inv_s["total"]), border=0, fill=True, align='C')
+            pdf.cell(cw_R[2], 6, f"{inv_s['pct']}%",   border=0, fill=True, align='C')
+
+        y_row += 6
+
+    # Footer
+    pdf.set_y(-14)
+    pdf.set_font("Helvetica","I",7); pdf.set_text_color(*CGR)
+    pdf.cell(W, 5,
+             f"Ruvixx Case Investigation  ·  {safe(cfg['name'])}  ·  "
+             f"Week of {safe(sel_week['label'])}, {sel_month['year']}  ·  Confidential",
+             align='C')
+
+    return bytes(pdf.output())
 
 # ──────────────────────────────────────────────────────────────────────────────
 # THEME
@@ -375,107 +642,81 @@ ABSC = "#44403C" if dark else "#FEE2CC"
 # ──────────────────────────────────────────────────────────────────────────────
 st.markdown(f"""
 <style>
-  .stApp {{ background-color: {BG} !important; }}
-  .main .block-container {{ padding: 1rem 2rem 2rem; max-width: 1440px; }}
-  #MainMenu, footer, header {{ visibility: hidden; }}
-
-  /* ── File uploader: show only Browse button ── */
-  [data-testid="stFileUploaderDropzoneInstructions"] {{ display: none !important; }}
+  .stApp {{ background-color:{BG} !important; }}
+  .main .block-container {{ padding:1rem 2rem 2rem; max-width:1440px; }}
+  #MainMenu, footer, header {{ visibility:hidden; }}
+  [data-testid="stFileUploaderDropzoneInstructions"] {{ display:none !important; }}
   [data-testid="stFileUploaderDropzone"] {{
-      border: 1px dashed {BORD} !important; border-radius: 8px !important;
-      padding: 4px 8px !important; min-height: 0 !important; background: transparent !important;
-  }}
-  /* Hide the uploaded-file cards that Streamlit renders inside the widget */
-  [data-testid="stFileUploaderFile"] {{ display: none !important; }}
-  [data-testid="stFileUploaderFileData"] {{ display: none !important; }}
-
-  /* ── Cards ── */
+      border:1px dashed {BORD} !important; border-radius:8px !important;
+      padding:4px 8px !important; min-height:0 !important; background:transparent !important; }}
+  [data-testid="stFileUploaderFile"],
+  [data-testid="stFileUploaderFileData"] {{ display:none !important; }}
   [data-testid="stVerticalBlockBorderWrapper"] {{
-      border: 1px solid {BORD} !important; border-radius: 14px !important;
-      background: {CARD} !important;
-  }}
-  .sec-lbl {{ font-size:10px; font-weight:700; color:{ORG};
-               letter-spacing:.08em; text-transform:uppercase; margin-bottom:12px; }}
-  .pw {{ height:7px; background:{ABSC}; border-radius:4px; margin:4px 0; }}
-  .pf {{ height:100%; border-radius:4px; }}
-  .hl {{ display:flex; align-items:flex-start; gap:8px; margin-bottom:10px; }}
-  .hd {{ width:7px; height:7px; border-radius:50%; margin-top:4px;
-          flex-shrink:0; display:inline-block; }}
-
-  /* ── Buttons ── */
-  [data-testid="stButton"] button[kind="primary"] {{
-      background:{ORG} !important; color:white !important; border:none !important; }}
-  [data-testid="stButton"] button[kind="secondary"] {{
-      background:{CARD} !important; color:{TX} !important;
-      border:1px solid {BORD} !important; }}
-
-  /* ── File counter button ── */
-  [data-testid="stButton"] button[data-files-btn="true"] {{
-      background: {OL} !important; color: {ORG} !important;
-      border: 1px solid {OB} !important; font-weight: 700 !important;
-      font-size: 12px !important;
-  }}
-
-  hr {{ border-color:{BORD}; margin:6px 0; }}
-  [data-testid="stSelectbox"] > div > div {{
-      background:{CARD} !important; border-color:{BORD} !important; color:{TX} !important; }}
-  p, span, label, div {{ color:{TX}; }}
-  [data-testid="stSidebar"] {{ background:{CARD}; border-right:1px solid {BORD}; }}
-  [data-testid="stSidebar"] p,
-  [data-testid="stSidebar"] span,
-  [data-testid="stSidebar"] label {{ color:{TX}; }}
+      border:1px solid {BORD} !important; border-radius:14px !important;
+      background:{CARD} !important; }}
+  .sec-lbl {{ font-size:10px;font-weight:700;color:{ORG};
+              letter-spacing:.08em;text-transform:uppercase;margin-bottom:12px; }}
+  .pw {{ height:7px;background:{ABSC};border-radius:4px;margin:4px 0; }}
+  .pf {{ height:100%;border-radius:4px; }}
+  .hl {{ display:flex;align-items:flex-start;gap:8px;margin-bottom:10px; }}
+  .hd {{ width:7px;height:7px;border-radius:50%;margin-top:4px;flex-shrink:0;display:inline-block; }}
+  [data-testid="stButton"] button[kind="primary"]  {{ background:{ORG} !important;color:white !important;border:none !important; }}
+  [data-testid="stButton"] button[kind="secondary"] {{ background:{CARD} !important;color:{TX} !important;border:1px solid {BORD} !important; }}
+  hr {{ border-color:{BORD};margin:6px 0; }}
+  [data-testid="stSelectbox"] > div > div {{ background:{CARD} !important;border-color:{BORD} !important;color:{TX} !important; }}
+  p,span,label,div {{ color:{TX}; }}
+  [data-testid="stSidebar"] {{ background:{CARD};border-right:1px solid {BORD}; }}
+  [data-testid="stSidebar"] p,[data-testid="stSidebar"] span,[data-testid="stSidebar"] label {{ color:{TX}; }}
 </style>
 """, unsafe_allow_html=True)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# SIDEBAR — COUNTRY CONFIGURATION
+# SIDEBAR — COUNTRY CONFIG
 # ──────────────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## ⚙️ Country Configuration")
-    st.caption("Move countries, edit quotas, or add new groups.")
+    st.caption("Changes apply instantly to all displayed data.")
     if st.button("↩ Reset to defaults", use_container_width=True):
         st.session_state.rcfg = copy.deepcopy(DEFAULT_REGIONS); st.rerun()
     if st.session_state.week_quotas:
         st.markdown("---")
         st.markdown("**📋 Summary Quotas**")
-        for ws, regions in sorted(st.session_state.week_quotas.items()):
-            mcc_t = regions.get("MCC", {}).get("total", 0)
-            cs_t  = regions.get("CS",  {}).get("total", 0)
-            st.caption(f"Wk {fmt_day(ws)}: MCC={mcc_t} · CS={cs_t}")
+        for ws, reg in sorted(st.session_state.week_quotas.items()):
+            st.caption(f"Wk {fmt_day(ws)}: MCC={reg.get('MCC',{}).get('total',0)} · CS={reg.get('CS',{}).get('total',0)}")
     st.markdown("---")
     assigned   = get_all_assigned()
     all_pool   = sorted(set(ALL_KNOWN_COUNTRIES) | set(assigned.keys()))
     unassigned = [c for c in all_pool if c not in assigned]
-    for rk in ["MCC", "CS"]:
-        rcfg = st.session_state.rcfg[rk]
-        st.markdown(f"### 🌎 {rcfg['name']}")
+    for rk in ["MCC","CS"]:
+        rc = st.session_state.rcfg[rk]
+        st.markdown(f"### 🌎 {rc['name']}")
         st.caption(f"Total quota: **{total_quota(rk)}** cases")
-        for gi, g in enumerate(list(rcfg["groups"])):
-            with st.expander(f"📦 {g['label']}  ({g['quota']})", expanded=False):
-                new_q = st.number_input("Quota", value=g["quota"], min_value=0, step=1, key=f"q_{rk}_{gi}")
-                if new_q != g["quota"]:
-                    st.session_state.rcfg[rk]["groups"][gi]["quota"] = int(new_q); st.rerun()
-                new_label = st.text_input("Name", value=g["label"], key=f"lbl_{rk}_{gi}")
-                if new_label != g["label"]:
-                    st.session_state.rcfg[rk]["groups"][gi]["label"] = new_label; st.rerun()
+        for gi, g in enumerate(list(rc["groups"])):
+            with st.expander(f"📦 {g['label']} ({g['quota']})", expanded=False):
+                nq = st.number_input("Quota", value=g["quota"], min_value=0, step=1, key=f"q_{rk}_{gi}")
+                if nq != g["quota"]:
+                    st.session_state.rcfg[rk]["groups"][gi]["quota"] = int(nq); st.rerun()
+                nl = st.text_input("Name", value=g["label"], key=f"lbl_{rk}_{gi}")
+                if nl != g["label"]:
+                    st.session_state.rcfg[rk]["groups"][gi]["label"] = nl; st.rerun()
                 st.markdown("**Countries:**")
                 for country in list(g["countries"]):
-                    cc1, cc2 = st.columns([5, 1])
-                    cc1.markdown(f"🌍 {country}")
-                    if cc2.button("✕", key=f"rm_{rk}_{gi}_{country}"):
+                    ca, cb = st.columns([5,1])
+                    ca.markdown(f"🌍 {country}")
+                    if cb.button("✕", key=f"rm_{rk}_{gi}_{country}"):
                         st.session_state.rcfg[rk]["groups"][gi]["countries"].remove(country); st.rerun()
-                other   = [c for c, (r, _) in assigned.items() if r != rk]
-                movable = sorted(set(unassigned + other))
+                others  = [c for c,(r,_) in assigned.items() if r != rk]
+                movable = sorted(set(unassigned + others))
                 if movable:
-                    pick = st.selectbox("Add / move", ["— select —"] + movable, key=f"add_{rk}_{gi}")
+                    pick = st.selectbox("Add / move", ["— select —"]+movable, key=f"add_{rk}_{gi}")
                     if pick and pick != "— select —":
                         for rk2 in st.session_state.rcfg:
                             for g2 in st.session_state.rcfg[rk2]["groups"]:
                                 if pick in g2["countries"]: g2["countries"].remove(pick)
                         st.session_state.rcfg[rk]["groups"][gi]["countries"].append(pick); st.rerun()
-                custom = st.text_input("Add unlisted", placeholder="Country name", key=f"cust_{rk}_{gi}")
-                if custom:
-                    cn = custom.strip().title()
+                cust = st.text_input("Add unlisted", placeholder="Country name", key=f"cust_{rk}_{gi}")
+                if cust:
+                    cn = cust.strip().title()
                     if cn and cn not in g["countries"]:
                         for rk2 in st.session_state.rcfg:
                             for g2 in st.session_state.rcfg[rk2]["groups"]:
@@ -485,13 +726,14 @@ with st.sidebar:
                     if st.button("🗑 Delete group", key=f"del_{rk}_{gi}"):
                         st.session_state.rcfg[rk]["groups"].pop(gi); st.rerun()
         with st.expander("➕ New group", expanded=False):
-            ng_name  = st.text_input("Name", placeholder="e.g. Venezuela", key=f"ng_{rk}")
-            ng_quota = st.number_input("Quota", value=5, min_value=0, key=f"ngq_{rk}")
-            if st.button(f"Add to {rk}", key=f"ngb_{rk}") and ng_name:
-                st.session_state.rcfg[rk]["groups"].append({"label": ng_name, "countries": [], "quota": int(ng_quota)}); st.rerun()
+            nn = st.text_input("Name", placeholder="e.g. Venezuela", key=f"ng_{rk}")
+            nq = st.number_input("Quota", value=5, min_value=0, key=f"ngq_{rk}")
+            if st.button(f"Add to {rk}", key=f"ngb_{rk}") and nn:
+                st.session_state.rcfg[rk]["groups"].append({"label":nn,"countries":[],"quota":int(nq)}); st.rerun()
         st.markdown("---")
     if unassigned:
-        st.markdown("### ⚠️ Unassigned")
+        st.markdown("### ⚠️ Unassigned Countries")
+        st.caption("In data but not assigned to any group:")
         for c in unassigned: st.markdown(f"- {c}")
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -499,8 +741,9 @@ with st.sidebar:
 # ──────────────────────────────────────────────────────────────────────────────
 cfg   = st.session_state.rcfg[st.session_state.tab]
 pills = region_pills(st.session_state.tab)
-cl, cm, cs_, cr, ct = st.columns([1.4, 1, 1, 4.5, 0.5])
-with cl:
+
+col_logo, col_mcc, col_cs, col_region, col_theme = st.columns([1.4,1,1,4.5,0.5])
+with col_logo:
     st.markdown(f"""
     <div style="display:flex;align-items:center;gap:8px;padding:5px 0">
       <div style="width:30px;height:30px;background:{ORG};border-radius:7px;display:flex;
@@ -510,29 +753,26 @@ with cl:
         <div style="font-size:8px;color:{TX2};letter-spacing:.06em;text-transform:uppercase">Case Investigation</div>
       </div>
     </div>""", unsafe_allow_html=True)
-with cm:
+with col_mcc:
     if st.button("México CC", key="btn_mcc",
-                 type="primary" if st.session_state.tab == "MCC" else "secondary",
+                 type="primary" if st.session_state.tab=="MCC" else "secondary",
                  use_container_width=True):
         st.session_state.tab = "MCC"; st.rerun()
-with cs_:
+with col_cs:
     if st.button("Cono Sur", key="btn_cs",
-                 type="primary" if st.session_state.tab == "CS" else "secondary",
+                 type="primary" if st.session_state.tab=="CS" else "secondary",
                  use_container_width=True):
         st.session_state.tab = "CS"; st.rerun()
-with cr:
-    pills_html = "".join(
-        f'<span style="font-size:9px;font-weight:700;background:{ORG};color:white;'
-        f'border-radius:3px;padding:1px 4px;margin:0 1px">{p}</span>' for p in pills)
+with col_region:
+    ph = "".join(f'<span style="font-size:9px;font-weight:700;background:{ORG};color:white;'
+                 f'border-radius:3px;padding:1px 4px;margin:0 1px">{p}</span>' for p in pills)
     st.markdown(f"""
     <div style="display:flex;align-items:center;gap:6px;background:{OL};border:1px solid {OB};
-                border-radius:8px;padding:6px 10px;font-size:12px;color:#92400E;
-                font-weight:500;flex-wrap:wrap">
-      <span style="width:7px;height:7px;border-radius:50%;background:{ORG};
-                   display:inline-block;flex-shrink:0"></span>
-      {cfg["name"]} · {cfg["contact"]}  {pills_html}
+                border-radius:8px;padding:6px 10px;font-size:12px;color:#92400E;font-weight:500;flex-wrap:wrap">
+      <span style="width:7px;height:7px;border-radius:50%;background:{ORG};display:inline-block;flex-shrink:0"></span>
+      {cfg["name"]} · {cfg["contact"]}  {ph}
     </div>""", unsafe_allow_html=True)
-with ct:
+with col_theme:
     if st.button("🌙" if not dark else "☀️", key="theme_btn", use_container_width=True):
         st.session_state.dark = not st.session_state.dark; st.rerun()
 
@@ -541,138 +781,134 @@ st.markdown(f'<hr style="border-color:{BORD}">', unsafe_allow_html=True)
 # ──────────────────────────────────────────────────────────────────────────────
 # CONTROLS
 # ──────────────────────────────────────────────────────────────────────────────
-data     = st.session_state.data
-has_data = not data.empty
+# Recompute regions from current config every render
+raw_data  = st.session_state.data
+full_data = with_region(raw_data)      # always fresh region assignment
+has_data  = not full_data.empty
 
 months_avail = []
 if has_data:
-    for ms in sorted(data["date"].str[:7].unique()):
+    for ms in sorted(full_data["date"].str[:7].unique()):
         y, m = int(ms[:4]), int(ms[5:7])
-        months_avail.append({"year": y, "month": m,
-                              "label": datetime(y, m, 1).strftime("%B %Y")})
+        months_avail.append({"year":y,"month":m,
+                              "label":datetime(y,m,1).strftime("%B %Y")})
 if not months_avail:
     t = datetime.today()
-    months_avail = [{"year": t.year, "month": t.month, "label": t.strftime("%B %Y")}]
+    months_avail = [{"year":t.year,"month":t.month,"label":t.strftime("%B %Y")}]
 
-c1, c2, c3, c4 = st.columns([2.2, 2.2, 1.6, 2.0])
+# Default month → month containing today (if available) or most recent
+today_label = datetime.today().strftime("%B %Y")
+avail_labels = [m["label"] for m in months_avail]
+default_m_idx = (avail_labels.index(today_label)
+                 if today_label in avail_labels else len(months_avail)-1)
+
+c1, c2, c3, c4 = st.columns([2.2, 2.4, 1.4, 2.0])
 
 with c1:
-    sel_m_lbl = st.selectbox("Month", [m["label"] for m in months_avail],
-                              index=len(months_avail)-1, label_visibility="collapsed",
-                              key="sel_month")
+    sel_m_lbl = st.selectbox("Month", avail_labels, index=default_m_idx,
+                              label_visibility="collapsed", key="sel_month")
     sel_month = next(m for m in months_avail if m["label"] == sel_m_lbl)
 
 with c2:
-    weeks    = get_weeks(sel_month["year"], sel_month["month"])
-    w_labels = [f"Week of {w['label']}" for w in weeks]
-    w_display = [
-        f"★ {lbl}" if weeks[i]["start"] in st.session_state.week_quotas else lbl
-        for i, lbl in enumerate(w_labels)
+    weeks   = get_weeks(sel_month["year"], sel_month["month"])
+    w_disp  = [
+        f"★ Week of {w['label']}" if w["start"] in st.session_state.week_quotas
+        else f"Week of {w['label']}"
+        for w in weeks
     ]
-    sel_w_disp = st.selectbox("Week", w_display, label_visibility="collapsed", key="sel_week")
-    sel_week   = weeks[w_display.index(sel_w_disp)]
+    # Auto-select current week when month changes
+    month_key = f"{sel_month['year']}-{sel_month['month']}"
+    if st.session_state._wk_month_key != month_key:
+        st.session_state._wk_month_key = month_key
+        st.session_state["sel_week"] = w_disp[current_week_idx(weeks)]
+
+    sel_w_disp = st.selectbox("Week", w_disp, label_visibility="collapsed", key="sel_week")
+    sel_week   = weeks[w_disp.index(sel_w_disp)]
 
 with c3:
     n_files = len(st.session_state.files)
     if n_files == 0:
-        # No files yet — show the uploader directly
-        uploaded = st.file_uploader(
-            "upload", type=["csv","xlsx","xls","tsv"],
-            accept_multiple_files=True, key="main_uploader",
-            label_visibility="collapsed",
-            help="Upload detail CSVs and/or summary CSVs (filename must contain 'summary').",
-        )
+        uploaded = st.file_uploader("upload", type=["csv","xlsx","xls","tsv"],
+                                    accept_multiple_files=True, key="main_uploader",
+                                    label_visibility="collapsed",
+                                    help="Upload detail CSVs/XLSX and summary CSVs (filename must include 'summary').")
         if uploaded:
-            if process_uploaded_files(uploaded):
-                st.rerun()
-            elif any(f.name not in st.session_state.files for f in uploaded):
-                st.rerun()
+            if process_files(uploaded): st.rerun()
+            elif any(f.name not in st.session_state.files for f in uploaded): st.rerun()
     else:
-        # Files loaded — show compact counter button
         arrow = "▾" if st.session_state.show_files_panel else "▸"
-        label = f"📂  {n_files} file{'s' if n_files > 1 else ''}  {arrow}"
-        if st.button(label, key="files_btn", use_container_width=True, type="secondary"):
-            st.session_state.show_files_panel = not st.session_state.show_files_panel
-            st.rerun()
+        if st.button(f"📂  {n_files} file{'s' if n_files>1 else ''}  {arrow}",
+                     key="files_btn", use_container_width=True, type="secondary"):
+            st.session_state.show_files_panel = not st.session_state.show_files_panel; st.rerun()
 
 with c4:
     if has_data:
-        n_mcc = len(data[data["region"] == "MCC"])
-        n_cs  = len(data[data["region"] == "CS"])
+        n_mcc = len(full_data[full_data["region"]=="MCC"])
+        n_cs  = len(full_data[full_data["region"]=="CS"])
         st.markdown(
             f'<div style="font-size:11px;color:{TX2};padding-top:6px;line-height:1.7">'
-            f'{len(data)} cases &nbsp;·&nbsp; MCC: <b style="color:{ORG}">{n_mcc}</b>'
-            f' &nbsp;·&nbsp; CS: <b style="color:{ORG}">{n_cs}</b></div>',
-            unsafe_allow_html=True)
+            f'{len(raw_data)} cases &nbsp;·&nbsp; '
+            f'MCC: <b style="color:{ORG}">{n_mcc}</b> &nbsp;·&nbsp; '
+            f'CS: <b style="color:{ORG}">{n_cs}</b></div>', unsafe_allow_html=True)
+    else:
+        st.markdown(f'<div style="font-size:11px;color:{TX2};padding-top:8px">'
+                    f'No data — upload detail and/or summary files.</div>', unsafe_allow_html=True)
 
-# ──────────────────────────────────────────────────────────────────────────────
-# FILE MANAGEMENT PANEL  (toggled by counter button)
-# ──────────────────────────────────────────────────────────────────────────────
+# ── File management panel ──────────────────────────────────────────────────────
 if st.session_state.show_files_panel and st.session_state.files:
     with st.container(border=True):
-        ph_title, ph_add, ph_clear = st.columns([3, 1.4, 0.8])
-        with ph_title:
-            st.markdown(
-                f'<div style="font-size:11px;font-weight:700;color:{TX};padding-top:6px">'
-                f'📂 Loaded files</div>',
-                unsafe_allow_html=True)
-        with ph_add:
-            # Uploader inside panel to add more files
-            more = st.file_uploader(
-                "add", type=["csv","xlsx","xls","tsv"],
-                accept_multiple_files=True, key="panel_uploader",
-                label_visibility="collapsed",
-                help="Add more files",
-            )
+        ph0, ph1, ph2 = st.columns([3, 1.4, 0.8])
+        with ph0:
+            st.markdown(f'<div style="font-size:11px;font-weight:700;color:{TX};padding-top:6px">📂 Loaded files</div>',
+                        unsafe_allow_html=True)
+        with ph1:
+            more = st.file_uploader("add more", type=["csv","xlsx","xls","tsv"],
+                                    accept_multiple_files=True, key="panel_uploader",
+                                    label_visibility="collapsed")
             if more:
-                if process_uploaded_files(more):
-                    st.rerun()
-                elif any(f.name not in st.session_state.files for f in more):
-                    st.rerun()
-        with ph_clear:
-            if st.button("Clear all", key="clear_all_btn", type="secondary",
-                         use_container_width=True):
-                st.session_state.data         = EMPTY_DF.copy()
-                st.session_state.files        = []
-                st.session_state.week_quotas  = {}
+                if process_files(more): st.rerun()
+                elif any(f.name not in st.session_state.files for f in more): st.rerun()
+        with ph2:
+            if st.button("Clear all", key="clear_all", type="secondary", use_container_width=True):
+                st.session_state.data               = EMPTY_DF.copy()
+                st.session_state.files              = []
+                st.session_state.week_quotas        = {}
                 st.session_state.summary_file_weeks = {}
                 st.session_state.show_files_panel   = False
                 st.rerun()
-
         st.markdown(f'<hr style="border-color:{BORD};margin:6px 0">', unsafe_allow_html=True)
-
         for fname in list(st.session_state.files):
             is_sum = "summary" in fname.lower()
-            icon   = "📋" if is_sum else "📄"
             tag_bg = "#DCFCE7" if is_sum else OL
-            tag_c  = GRN if is_sum else ORG
+            tag_c  = GRN      if is_sum else ORG
             tag    = "Summary" if is_sum else "Detail"
             fc1, fc2, fc3 = st.columns([5.5, 0.9, 0.5])
-            with fc1:
-                st.markdown(
-                    f'<div style="font-size:12px;color:{TX};padding:4px 0;'
-                    f'white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'
-                    f'{icon} {fname}</div>',
-                    unsafe_allow_html=True)
-            with fc2:
-                st.markdown(
-                    f'<span style="font-size:10px;background:{tag_bg};color:{tag_c};'
-                    f'padding:2px 7px;border-radius:10px;font-weight:600">{tag}</span>',
-                    unsafe_allow_html=True)
-            with fc3:
-                if st.button("✕", key=f"rm_file_{fname}", help=f"Remove {fname}"):
-                    remove_file(fname); st.rerun()
+            fc1.markdown(f'<div style="font-size:12px;color:{TX};padding:4px 0;'
+                         f'white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{"📋" if is_sum else "📄"} {fname}</div>',
+                         unsafe_allow_html=True)
+            fc2.markdown(f'<span style="font-size:10px;background:{tag_bg};color:{tag_c};'
+                         f'padding:2px 7px;border-radius:10px;font-weight:600">{tag}</span>',
+                         unsafe_allow_html=True)
+            if fc3.button("✕", key=f"rm_{fname}", help=f"Remove {fname}"):
+                remove_file(fname); st.rerun()
 
 # ──────────────────────────────────────────────────────────────────────────────
-# COMPUTE
+# COMPUTE  (dynamic region assignment — always reflects current config)
 # ──────────────────────────────────────────────────────────────────────────────
 cfg    = st.session_state.rcfg[st.session_state.tab]
-tq     = effective_quota(st.session_state.tab, sel_week)
-r_data = data[data["region"] == st.session_state.tab] if has_data else pd.DataFrame()
+tq     = effective_quota(st.session_state.tab, sel_week["start"])
+
+# Region filter using live config
+r_data = (full_data[full_data["region"] == st.session_state.tab].copy()
+          if has_data else pd.DataFrame())
+
+# Week slice
 w_data = (r_data[(r_data["date"] >= sel_week["start"]) & (r_data["date"] <= sel_week["end"])]
           if not r_data.empty else pd.DataFrame())
-m_prefix = f"{sel_month['year']:04d}-{sel_month['month']:02d}"
-m_data   = r_data[r_data["date"].str.startswith(m_prefix)] if not r_data.empty else pd.DataFrame()
+
+# Month slice
+m_pfx  = f"{sel_month['year']:04d}-{sel_month['month']:02d}"
+m_data = r_data[r_data["date"].str.startswith(m_pfx)] if not r_data.empty else pd.DataFrame()
 
 total = len(w_data)
 gap   = max(0, tq - total)
@@ -682,6 +918,7 @@ groups = [
     {**g, "done": len(w_data[w_data["country"].isin(g["countries"])]) if not w_data.empty else 0}
     for g in cfg["groups"]
 ]
+
 invs = []
 if not w_data.empty:
     for inv_name, grp in sorted(w_data.groupby("investigator"), key=lambda x: -len(x[1])):
@@ -692,9 +929,11 @@ if not w_data.empty:
             "by_day":      grp.groupby("date").size().to_dict(),
             "support":     inv_name in cfg.get("support", []),
         })
+
+# Week day slots Mon–Fri
 w_days = []
-d_cur = datetime.strptime(sel_week["start"], "%Y-%m-%d")
-d_end = datetime.strptime(sel_week["end"],   "%Y-%m-%d")
+d_cur  = datetime.strptime(sel_week["start"], "%Y-%m-%d")
+d_end  = datetime.strptime(sel_week["end"],   "%Y-%m-%d")
 while d_cur <= d_end:
     ds = d_cur.strftime("%Y-%m-%d")
     w_days.append({"ds": ds, "label": fmt_day(ds), "day": str(d_cur.day),
@@ -704,40 +943,59 @@ while d_cur <= d_end:
 by_country  = (w_data.groupby("country").size().sort_values(ascending=False).to_dict()
                if not w_data.empty else {})
 by_inv_stat = [{"name": i["name"], "total": i["total"],
-                "pct": round(i["total"]/total*100) if total else 0,
+                "pct":  round(i["total"]/total*100) if total else 0,
                 "support": i["support"]} for i in invs]
 quota_from_summary = bool(st.session_state.week_quotas.get(sel_week["start"]))
 
 # ──────────────────────────────────────────────────────────────────────────────
-# METRIC ROW
+# METRIC ROW + PDF BUTTON
 # ──────────────────────────────────────────────────────────────────────────────
 src_tag = (f' <span style="font-size:9px;color:{GRN};background:#DCFCE7;'
            f'padding:1px 6px;border-radius:10px">★ summary</span>'
            if quota_from_summary else "")
-st.markdown(f"""
-<div style="display:flex;justify-content:flex-end;align-items:center;gap:28px;padding:8px 0 12px">
-  <div style="text-align:center">
-    <div style="font-size:22px;font-weight:800;color:{ORG};line-height:1">{total}</div>
-    <div style="font-size:9px;color:{TX2};text-transform:uppercase;letter-spacing:.06em">Cases Generated</div>
-  </div>
-  <div style="text-align:center">
-    <div style="font-size:22px;font-weight:800;color:{ORG};line-height:1">{gap}</div>
-    <div style="font-size:9px;color:{TX2};text-transform:uppercase;letter-spacing:.06em">Quota Gap</div>
-  </div>
-  <div style="text-align:center">
-    <div style="font-size:22px;font-weight:800;color:{ORG};line-height:1">{pct}%{src_tag}</div>
-    <div style="font-size:9px;color:{TX2};text-transform:uppercase;letter-spacing:.06em">Quota Progress</div>
-  </div>
-  <div style="text-align:right">
-    <div style="font-size:12px;font-weight:700;color:{TX}">Trimble LATAM</div>
-    <div style="font-size:10px;color:{TX2}">{sel_week["label"]}, {sel_month["year"]}</div>
-  </div>
-</div>""", unsafe_allow_html=True)
+
+mrow_left, mrow_right = st.columns([7, 1])
+with mrow_left:
+    st.markdown(f"""
+    <div style="display:flex;justify-content:flex-end;align-items:center;gap:28px;padding:8px 0 12px">
+      <div style="text-align:center">
+        <div style="font-size:22px;font-weight:800;color:{ORG};line-height:1">{total}</div>
+        <div style="font-size:9px;color:{TX2};text-transform:uppercase;letter-spacing:.06em">Cases Generated</div>
+      </div>
+      <div style="text-align:center">
+        <div style="font-size:22px;font-weight:800;color:{ORG};line-height:1">{gap}</div>
+        <div style="font-size:9px;color:{TX2};text-transform:uppercase;letter-spacing:.06em">Quota Gap</div>
+      </div>
+      <div style="text-align:center">
+        <div style="font-size:22px;font-weight:800;color:{ORG};line-height:1">{pct}%{src_tag}</div>
+        <div style="font-size:9px;color:{TX2};text-transform:uppercase;letter-spacing:.06em">Quota Progress</div>
+      </div>
+      <div style="text-align:right">
+        <div style="font-size:12px;font-weight:700;color:{TX}">Trimble LATAM</div>
+        <div style="font-size:10px;color:{TX2}">{sel_week["label"]}, {sel_month["year"]}</div>
+      </div>
+    </div>""", unsafe_allow_html=True)
+
+with mrow_right:
+    if PDF_OK and has_data:
+        pdf_bytes = generate_pdf(
+            st.session_state.tab, cfg, tq, total, gap, pct,
+            groups, invs, w_days, by_country, by_inv_stat,
+            sel_week, sel_month, quota_from_summary,
+        )
+        fname_pdf = (f"ruvixx_{st.session_state.tab.lower()}_"
+                     f"{sel_week['start']}_{sel_week['end']}.pdf")
+        st.download_button("📄 PDF", data=pdf_bytes, file_name=fname_pdf,
+                           mime="application/pdf", use_container_width=True,
+                           type="secondary")
+    elif not PDF_OK:
+        st.caption("fpdf2 not installed")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# MAIN ROW: GAUGE | GROUPS | HIGHLIGHTS
+# MAIN ROW: GAUGE | GROUP BREAKDOWN | HIGHLIGHTS
 # ──────────────────────────────────────────────────────────────────────────────
 mc1, mc2, mc3 = st.columns([1.5, 3, 2])
+
 with mc1:
     with st.container(border=True):
         fig_g = go.Figure(go.Pie(
@@ -760,14 +1018,14 @@ with mc2:
         summary_groups = (st.session_state.week_quotas.get(sel_week["start"], {})
                           .get(st.session_state.tab, {}).get("groups", {}))
         for g in groups:
-            sq = next((v for sg, v in summary_groups.items()
-                       if any(c.lower() in sg.lower() or sg.lower() in c.lower()
-                              for c in g["countries"])), None)
+            sq   = next((v for sg, v in summary_groups.items()
+                         if any(c.lower() in sg.lower() or sg.lower() in c.lower()
+                                for c in g["countries"])), None)
             dq   = sq if sq else g["quota"]
             left = max(0, dq - g["done"])
-            bp   = min(100, g["done"] / dq * 100) if dq else 0
-            bc   = GRN if left == 0 else (ORG if g["done"] / max(dq,1) >= 0.6 else RED)
-            lbl  = "✓ done" if left == 0 else f"{left} left"
+            bp   = min(100, g["done"]/dq*100) if dq else 0
+            bc   = GRN if left==0 else (ORG if g["done"]/max(dq,1)>=0.6 else RED)
+            lbl  = "✓ done" if left==0 else f"{left} left"
             st.markdown(f"""
             <div style="margin-bottom:9px">
               <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:3px">
@@ -790,8 +1048,8 @@ with mc3:
         st.markdown('<div class="sec-lbl">⚡ Key Highlights</div>', unsafe_allow_html=True)
         hl = [{"c":ORG,"t":"Batch in progress","s":f"{total}/{tq} — {gap} cases remaining"}]
         for g in groups:
-            left = max(0, g["quota"] - g["done"])
-            hc = GRN if left==0 else (ORG if g["done"]/max(g["quota"],1)>=0.6 else RED)
+            left = max(0, g["quota"]-g["done"])
+            hc   = GRN if left==0 else (ORG if g["done"]/max(g["quota"],1)>=0.6 else RED)
             hl.append({"c":hc,"t":g["label"],
                        "s":f"{g['done']}/{g['quota']} — {'All complete ✓' if left==0 else f'{left} cases left'}"})
         if invs:
@@ -818,7 +1076,7 @@ st.markdown(f"""
             text-transform:uppercase;margin-bottom:8px">
   👤 Investigator Quota Performance — Min {cfg['daily_min']}/day · Ideal {cfg['daily_ideal']}/day · {sel_week['label']}
   <span style="font-size:10px;font-weight:400;background:{OL};padding:2px 8px;
-               border-radius:20px;border:1px dashed {OB};margin-left:8px">click to expand ↓</span>
+               border-radius:20px;border:1px dashed {OB};margin-left:8px">click card to expand ↓</span>
 </div>""", unsafe_allow_html=True)
 
 def make_card(inv):
@@ -833,27 +1091,26 @@ def make_card(inv):
                  f'<div style="font-size:10px;font-weight:700;color:{tc};margin-bottom:3px">{"–" if not n else n}</div>'
                  f'<div style="height:24px;background:{dc};border-radius:4px"></div>'
                  f'<div style="font-size:9px;color:{TX2};margin-top:3px">{wd["day"]}</div></div>')
-    if inv["support"]:
-        prog = (f'<div style="display:flex;justify-content:space-between;font-size:12px;'
-                f'color:{TX2};margin-bottom:12px"><span>Cases contributed</span>'
-                f'<span style="font-weight:700;color:{TX}">{inv["total"]} cases</span></div>')
-    else:
-        prog = (
-            f'<div style="display:flex;justify-content:space-between;font-size:12px;'
-            f'color:{TX2};margin-bottom:3px"><span>Week total</span>'
-            f'<span style="font-weight:700;color:{bc}">{inv["total"]} cases</span></div>'
-            f'<div style="height:7px;background:{ABSC};border-radius:4px;margin-bottom:3px">'
-            f'<div style="height:100%;width:{wk_pct:.1f}%;background:{bc};border-radius:4px"></div></div>'
-            f'<div style="display:flex;justify-content:space-between;font-size:10px;'
-            f'color:{TX2};margin-bottom:6px"><span>0</span>'
-            f'<span>▲ min {cfg["weekly_min"]}</span>'
-            f'<span style="color:{GRN}">ideal {cfg["weekly_ideal"]}</span></div>'
-            f'<div style="font-size:11px;color:{TX2};margin-bottom:10px">'
-            f'Month total: <b style="color:{ORG}">{inv["month_total"]} cases</b>'
-            f'<span style="font-size:10px"> ({sel_month["label"]})</span></div>'
-        )
+    prog = (
+        f'<div style="display:flex;justify-content:space-between;font-size:12px;'
+        f'color:{TX2};margin-bottom:3px"><span>Week total</span>'
+        f'<span style="font-weight:700;color:{bc}">{inv["total"]} cases</span></div>'
+        f'<div style="height:7px;background:{ABSC};border-radius:4px;margin-bottom:3px">'
+        f'<div style="height:100%;width:{wk_pct:.1f}%;background:{bc};border-radius:4px"></div></div>'
+        f'<div style="display:flex;justify-content:space-between;font-size:10px;'
+        f'color:{TX2};margin-bottom:6px"><span>0</span>'
+        f'<span>▲ min {cfg["weekly_min"]}</span>'
+        f'<span style="color:{GRN}">ideal {cfg["weekly_ideal"]}</span></div>'
+        f'<div style="font-size:11px;color:{TX2};margin-bottom:10px">'
+        f'Month total: <b style="color:{ORG}">{inv["month_total"]} cases</b>'
+        f'<span style="font-size:10px"> ({sel_month["label"]})</span></div>'
+    ) if not inv["support"] else (
+        f'<div style="display:flex;justify-content:space-between;font-size:12px;'
+        f'color:{TX2};margin-bottom:12px"><span>Cases contributed</span>'
+        f'<span style="font-weight:700;color:{TX}">{inv["total"]} cases</span></div>'
+    )
     sup_sub = f'<div style="font-size:10px;color:{TX2}">Support role</div>' if inv["support"] else ""
-    legend = "".join(
+    legend  = "".join(
         f'<span style="display:flex;align-items:center;gap:3px;font-size:10px;color:{TX2}">'
         f'<span style="width:9px;height:9px;background:{lc};border-radius:2px;display:inline-block"></span>{ll}</span>'
         for lc, ll in [(GRN,f'≥{cfg["daily_ideal"]} ideal'),(ORG,f'{cfg["daily_min"]}–{cfg["daily_ideal"]-1} min'),
@@ -909,27 +1166,27 @@ else:
                                 f'text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px">By country</div>',
                                 unsafe_allow_html=True)
                     if not w_data.empty:
-                        inv_c = (w_data[w_data["investigator"] == inv["name"]]
-                                 .groupby("country").size().sort_values().to_dict())
-                        if inv_c:
-                            fig_c = go.Figure(go.Bar(x=list(inv_c.values()), y=list(inv_c.keys()),
+                        ic = (w_data[w_data["investigator"]==inv["name"]]
+                              .groupby("country").size().sort_values().to_dict())
+                        if ic:
+                            fig_c = go.Figure(go.Bar(x=list(ic.values()), y=list(ic.keys()),
                                                      orientation="h", marker_color=ORG, marker_line_width=0))
-                            fig_c.update_layout(height=max(120, len(inv_c)*28), margin=dict(t=5,b=5,l=5,r=5),
+                            fig_c.update_layout(height=max(120,len(ic)*28), margin=dict(t=5,b=5,l=5,r=5),
                                                 paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                                                 template=PLT, xaxis=dict(showgrid=True), yaxis=dict(showgrid=False))
                             st.plotly_chart(fig_c, use_container_width=True, config={"displayModeBar": False})
                 if not m_data.empty:
-                    inv_m = m_data[m_data["investigator"] == inv["name"]]
-                    if not inv_m.empty:
+                    im = m_data[m_data["investigator"]==inv["name"]]
+                    if not im.empty:
                         st.markdown(f'<div style="font-size:10px;font-weight:700;color:{ORG};'
                                     f'text-transform:uppercase;letter-spacing:.08em;margin:8px 0 6px">'
                                     f'Month — {sel_month["label"]}</div>', unsafe_allow_html=True)
-                        m_by_day = inv_m.groupby("date").size()
-                        m_dates  = sorted(m_by_day.index)
-                        m_vals   = [m_by_day[d] for d in m_dates]
+                        mbd = im.groupby("date").size()
+                        md  = sorted(mbd.index)
+                        mv  = [mbd[d] for d in md]
                         fig_m = go.Figure(go.Bar(
-                            x=[fmt_day(d) for d in m_dates], y=m_vals,
-                            marker_color=[dot_color(n, cfg["daily_min"], cfg["daily_ideal"]) for n in m_vals],
+                            x=[fmt_day(d) for d in md], y=mv,
+                            marker_color=[dot_color(n, cfg["daily_min"], cfg["daily_ideal"]) for n in mv],
                             marker_line_width=0))
                         fig_m.update_layout(height=150, margin=dict(t=5,b=5,l=5,r=5),
                                             paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
@@ -978,10 +1235,10 @@ with bc1:
     with st.container(border=True):
         st.markdown('<div class="sec-lbl">Cases by Country</div>', unsafe_allow_html=True)
         if by_country:
-            fig_ctr = go.Figure(go.Bar(x=list(by_country.values()), y=list(by_country.keys()),
-                                        orientation="h", marker_color=ORG, marker_line_width=0,
-                                        text=list(by_country.values()), textposition="outside",
-                                        textfont=dict(color=TX)))
+            fig_ctr = go.Figure(go.Bar(
+                x=list(by_country.values()), y=list(by_country.keys()),
+                orientation="h", marker_color=ORG, marker_line_width=0,
+                text=list(by_country.values()), textposition="outside", textfont=dict(color=TX)))
             fig_ctr.update_layout(height=max(220, len(by_country)*30), margin=dict(t=5,b=5,l=10,r=40),
                                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                                    template=PLT,
@@ -995,11 +1252,11 @@ with bc2:
     with st.container(border=True):
         st.markdown('<div class="sec-lbl">Cases by Investigator</div>', unsafe_allow_html=True)
         if by_inv_stat:
-            fig_inv = go.Figure(go.Bar(x=[i["total"] for i in by_inv_stat],
-                                        y=[i["name"]  for i in by_inv_stat],
-                                        orientation="h", marker_color=ORG, marker_line_width=0,
-                                        text=[f"{i['total']} ({i['pct']}%)" for i in by_inv_stat],
-                                        textposition="outside", textfont=dict(color=TX)))
+            fig_inv = go.Figure(go.Bar(
+                x=[i["total"] for i in by_inv_stat], y=[i["name"] for i in by_inv_stat],
+                orientation="h", marker_color=ORG, marker_line_width=0,
+                text=[f"{i['total']} ({i['pct']}%)" for i in by_inv_stat],
+                textposition="outside", textfont=dict(color=TX)))
             fig_inv.update_layout(height=max(220, len(by_inv_stat)*40), margin=dict(t=5,b=5,l=10,r=90),
                                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                                    template=PLT,

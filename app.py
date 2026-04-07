@@ -862,7 +862,8 @@ else:
                     fig_d.update_layout(height=150,margin=dict(t=5,b=5,l=5,r=5),
                                         paper_bgcolor="rgba(0,0,0,0)",plot_bgcolor="rgba(0,0,0,0)",
                                         template=PLT,xaxis=dict(showgrid=False),yaxis=dict(showgrid=True))
-                    st.plotly_chart(fig_d,use_container_width=True,config={"displayModeBar":False})
+                    st.plotly_chart(fig_d,use_container_width=True,config={"displayModeBar":False},
+                                    key=f"fig_d_{inv['name']}")
                 with ex2:
                     st.markdown(f'<div style="font-size:10px;font-weight:700;color:{ORG};'
                                 f'text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px">By country</div>',
@@ -875,7 +876,8 @@ else:
                             fig_c.update_layout(height=max(120,len(ic)*28),margin=dict(t=5,b=5,l=5,r=5),
                                                 paper_bgcolor="rgba(0,0,0,0)",plot_bgcolor="rgba(0,0,0,0)",
                                                 template=PLT,xaxis=dict(showgrid=True),yaxis=dict(showgrid=False))
-                            st.plotly_chart(fig_c,use_container_width=True,config={"displayModeBar":False})
+                            st.plotly_chart(fig_c,use_container_width=True,config={"displayModeBar":False},
+                                            key=f"fig_c_{inv['name']}")
                 if not m_data.empty:
                     im=m_data[m_data["investigator"]==inv["name"]]
                     if not im.empty:
@@ -889,7 +891,8 @@ else:
                         fig_m.update_layout(height=150,margin=dict(t=5,b=5,l=5,r=5),
                                             paper_bgcolor="rgba(0,0,0,0)",plot_bgcolor="rgba(0,0,0,0)",
                                             template=PLT,xaxis=dict(showgrid=False,tickangle=-45),yaxis=dict(showgrid=True))
-                        st.plotly_chart(fig_m,use_container_width=True,config={"displayModeBar":False})
+                        st.plotly_chart(fig_m,use_container_width=True,config={"displayModeBar":False},
+                                        key=f"fig_m_{inv['name']}")
 
 st.markdown("<br>",unsafe_allow_html=True)
 

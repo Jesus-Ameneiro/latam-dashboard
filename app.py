@@ -501,7 +501,7 @@ def generate_pdf(tab_key, cfg, tq, total, gap, pct, groups, invs, w_days,
     pdf.set_font("Helvetica","",8)
     for item in items:
         prefix="    " if item.startswith("  ") else ""
-        pdf.cell(6,5,chr(149)); pdf.cell(W-6,5,safe(prefix+item.strip()),ln=True)
+        pdf.cell(6,5,"-"); pdf.cell(W-6,5,safe(prefix+item.strip()),ln=True)
     # Page 2
     pdf.add_page(); page_header(); pdf.ln(2)
     section("INVESTIGATOR PERFORMANCE — DAILY BREAKDOWN")

@@ -22,6 +22,13 @@ st.set_page_config(page_title="Ruvixx · Case Investigation", page_icon="🔶",
 APPS_SCRIPT_URL = st.secrets.get("APPS_SCRIPT_URL", "")
 
 # ──────────────────────────────────────────────────────────────────────────────
+# GITHUB CONFIG  (set in Streamlit Secrets or .streamlit/secrets.toml)
+# ──────────────────────────────────────────────────────────────────────────────
+GITHUB_TOKEN     = st.secrets.get("GITHUB_TOKEN", "")
+GITHUB_REPO      = st.secrets.get("GITHUB_REPO", "")
+GITHUB_DATA_PATH = st.secrets.get("GITHUB_DATA_PATH", "data/dashboard_data.json")
+
+# ──────────────────────────────────────────────────────────────────────────────
 # CONSTANTS
 # ──────────────────────────────────────────────────────────────────────────────
 ORG, GRN, RED = "#F97316", "#16A34A", "#EF4444"

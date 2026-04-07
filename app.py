@@ -96,7 +96,7 @@ for k, v in [
     ("summary_file_weeks", {}),
     ("last_refresh",       None),   # ISO timestamp of last successful Drive fetch
     ("_init_fetch",        False),  # guard: auto-fetch only once per session
-    ("_wk_month_key",      None),
+    ("_pending_fetch",   False),  # triggers fetch at top of next rerun
 ]:
     if k not in st.session_state:
         st.session_state[k] = v
@@ -404,8 +404,13 @@ def fetch_from_github(show_spinner=True):
     return True
 
 # ──────────────────────────────────────────────────────────────────────────────
-# AUTO-FETCH ON FIRST LOAD  (wrapped so a failure never prevents UI from loading)
+# PENDING FETCH  (triggered by tab switch or first load)
 # ──────────────────────────────────────────────────────────────────────────────
+if st.session_state._pending_fetch:
+    st.session_state._pending_fetch = False
+    fetch_from_github(show_spinner=False)
+
+# First-load auto-fetch
 if not st.session_state._init_fetch:
     st.session_state._init_fetch = True   # set first so a crash doesn't loop
     if GITHUB_TOKEN and GITHUB_REPO:
@@ -700,14 +705,14 @@ with cm:
                  type="primary" if st.session_state.tab=="MCC" else "secondary",
                  use_container_width=True):
         st.session_state.tab = "MCC"
-        fetch_from_github(show_spinner=True)
+        st.session_state._pending_fetch = True
         st.rerun()
 with cs_:
     if st.button("Cono Sur", key="btn_cs",
                  type="primary" if st.session_state.tab=="CS" else "secondary",
                  use_container_width=True):
         st.session_state.tab = "CS"
-        fetch_from_github(show_spinner=True)
+        st.session_state._pending_fetch = True
         st.rerun()
 with cr:
     ph="".join(f'<span style="font-size:9px;font-weight:700;background:{ORG};color:white;'

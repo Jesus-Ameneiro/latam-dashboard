@@ -462,8 +462,9 @@ def generate_pdf(tab_key, cfg, tq, total, gap, pct, groups, invs, w_days,
     # Page 1
     pdf.add_page(); page_header()
     pdf.set_font("Helvetica","",7); pdf.set_text_color(*CGR)
-    pdf.cell(W,4,f"Generated: {datetime.now().strftime('%B %d, %Y  %H:%M')}"
-               + ("  |  ★ Quotas from summary" if quota_from_summary else ""),align='R',ln=True)
+    summary_note = "  |  * Quotas from summary file" if quota_from_summary else ""
+    pdf.cell(W,4,safe(f"Generated: {datetime.now().strftime('%B %d, %Y  %H:%M')}{summary_note}"),
+             align='R',ln=True)
     pdf.ln(4)
     section("WEEKLY SUMMARY")
     y0=pdf.get_y(); bw=45; bh=22; x0=12
@@ -482,7 +483,7 @@ def generate_pdf(tab_key, cfg, tq, total, gap, pct, groups, invs, w_days,
     for i,g in enumerate(groups):
         left=max(0,g["quota"]-g["done"]); pg=min(100,round(g["done"]/g["quota"]*100)) if g["quota"] else 0
         status="COMPLETE" if left==0 else ("ON TRACK" if g["done"]/max(g["quota"],1)>=0.6 else "BEHIND")
-        tr([g["label"],g["quota"],g["done"],left,f"{pg}%",status],[72,18,18,24,22,32],
+        tr([g["label"] + (" *" if sq else ""), g["quota"],g["done"],left,f"{pg}%",status],[72,18,18,24,22,32],
            ['L','C','C','C','C','C'],even=i%2==0)
     pdf.set_font("Helvetica","B",8); pdf.set_text_color(*CO)
     for v,w,a in zip(["TOTAL",str(tq),str(sum(g["done"] for g in groups)),str(gap),f"{pct}%",""],

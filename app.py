@@ -642,31 +642,103 @@ ABSC = "#44403C" if dark else "#FEE2CC"
 # ──────────────────────────────────────────────────────────────────────────────
 st.markdown(f"""
 <style>
+  /* ── Layout & base ── */
   .stApp {{ background-color:{BG} !important; }}
   .main .block-container {{ padding:1rem 2rem 2rem; max-width:1440px; }}
   #MainMenu, footer, header {{ visibility:hidden; }}
+
+  /* ── File uploader: hide drag zone text, style Browse button ── */
   [data-testid="stFileUploaderDropzoneInstructions"] {{ display:none !important; }}
   [data-testid="stFileUploaderDropzone"] {{
       border:1px dashed {BORD} !important; border-radius:8px !important;
-      padding:4px 8px !important; min-height:0 !important; background:transparent !important; }}
+      padding:4px 8px !important; min-height:0 !important;
+      background:{CARD} !important; }}
+  [data-testid="stFileUploaderDropzone"] button {{
+      background:{CARD} !important; color:{TX} !important;
+      border:1px solid {BORD} !important; border-radius:6px !important; }}
+  [data-testid="stFileUploaderDropzone"] button:hover {{
+      background:{OL} !important; border-color:{ORG} !important; color:{ORG} !important; }}
   [data-testid="stFileUploaderFile"],
   [data-testid="stFileUploaderFileData"] {{ display:none !important; }}
+
+  /* ── Cards ── */
   [data-testid="stVerticalBlockBorderWrapper"] {{
       border:1px solid {BORD} !important; border-radius:14px !important;
       background:{CARD} !important; }}
+
+  /* ── Custom classes ── */
   .sec-lbl {{ font-size:10px;font-weight:700;color:{ORG};
               letter-spacing:.08em;text-transform:uppercase;margin-bottom:12px; }}
   .pw {{ height:7px;background:{ABSC};border-radius:4px;margin:4px 0; }}
   .pf {{ height:100%;border-radius:4px; }}
   .hl {{ display:flex;align-items:flex-start;gap:8px;margin-bottom:10px; }}
   .hd {{ width:7px;height:7px;border-radius:50%;margin-top:4px;flex-shrink:0;display:inline-block; }}
-  [data-testid="stButton"] button[kind="primary"]  {{ background:{ORG} !important;color:white !important;border:none !important; }}
-  [data-testid="stButton"] button[kind="secondary"] {{ background:{CARD} !important;color:{TX} !important;border:1px solid {BORD} !important; }}
-  hr {{ border-color:{BORD};margin:6px 0; }}
-  [data-testid="stSelectbox"] > div > div {{ background:{CARD} !important;border-color:{BORD} !important;color:{TX} !important; }}
+
+  /* ── Buttons ── */
+  [data-testid="stButton"] button {{
+      transition: background 0.15s, border-color 0.15s !important; }}
+  [data-testid="stButton"] button[kind="primary"] {{
+      background:{ORG} !important; color:#fff !important; border:none !important; }}
+  [data-testid="stButton"] button[kind="primary"]:hover {{
+      background:#EA6C0A !important; }}
+  [data-testid="stButton"] button[kind="secondary"] {{
+      background:{CARD} !important; color:{TX} !important;
+      border:1px solid {BORD} !important; }}
+  [data-testid="stButton"] button[kind="secondary"]:hover {{
+      background:{OL} !important; border-color:{ORG} !important; color:{ORG} !important; }}
+
+  /* ── Download button ── */
+  [data-testid="stDownloadButton"] button {{
+      background:{CARD} !important; color:{TX} !important;
+      border:1px solid {BORD} !important; border-radius:6px !important; }}
+  [data-testid="stDownloadButton"] button:hover {{
+      background:{OL} !important; border-color:{ORG} !important; color:{ORG} !important; }}
+
+  /* ── Selectbox control (the visible pill) ── */
+  [data-testid="stSelectbox"] > div > div {{
+      background:{CARD} !important; border-color:{BORD} !important; color:{TX} !important; }}
+  [data-baseweb="select"] > div {{
+      background:{CARD} !important; border-color:{BORD} !important; }}
+  [data-baseweb="select"] span,
+  [data-baseweb="select"] div {{ color:{TX} !important; }}
+  /* caret / chevron icon */
+  [data-baseweb="select"] svg {{ fill:{TX2} !important; }}
+
+  /* ── Selectbox dropdown popup (BaseWeb popover) ── */
+  [data-baseweb="popover"] {{
+      background:{CARD} !important; border:1px solid {BORD} !important;
+      border-radius:8px !important; box-shadow:none !important; }}
+  [data-baseweb="menu"] {{
+      background:{CARD} !important; }}
+  [data-baseweb="list"] {{
+      background:{CARD} !important; }}
+  /* Individual options */
+  [role="option"] {{
+      background:{CARD} !important; color:{TX} !important; }}
+  [role="option"]:hover,
+  [role="option"][aria-selected="true"] {{
+      background:{OL} !important; color:{ORG} !important; }}
+  /* Highlighted / focused option */
+  [data-baseweb="menu-item"]:hover,
+  [data-baseweb="menu-item"][data-highlighted="true"] {{
+      background:{OL} !important; color:{ORG} !important; }}
+
+  /* ── Misc ── */
+  hr {{ border-color:{BORD}; margin:6px 0; }}
   p,span,label,div {{ color:{TX}; }}
-  [data-testid="stSidebar"] {{ background:{CARD};border-right:1px solid {BORD}; }}
-  [data-testid="stSidebar"] p,[data-testid="stSidebar"] span,[data-testid="stSidebar"] label {{ color:{TX}; }}
+
+  /* ── Sidebar ── */
+  [data-testid="stSidebar"] {{
+      background:{CARD} !important; border-right:1px solid {BORD}; }}
+  [data-testid="stSidebar"] p,
+  [data-testid="stSidebar"] span,
+  [data-testid="stSidebar"] label {{ color:{TX} !important; }}
+  [data-testid="stSidebar"] [data-baseweb="select"] > div {{
+      background:{BG} !important; border-color:{BORD} !important; }}
+  [data-testid="stSidebar"] [data-testid="stNumberInput"] input,
+  [data-testid="stSidebar"] [data-testid="stTextInput"] input {{
+      background:{BG} !important; color:{TX} !important;
+      border-color:{BORD} !important; }}
 </style>
 """, unsafe_allow_html=True)
 

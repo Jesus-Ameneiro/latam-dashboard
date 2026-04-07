@@ -11,11 +11,6 @@ st.set_page_config(page_title="Ruvixx · Case Investigation", page_icon="🔶",
                    layout="wide", initial_sidebar_state="collapsed")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# DRIVE CONFIG  (set in Streamlit Secrets or .streamlit/secrets.toml)
-# ──────────────────────────────────────────────────────────────────────────────
-APPS_SCRIPT_URL = st.secrets.get("APPS_SCRIPT_URL", "")
-
-# ──────────────────────────────────────────────────────────────────────────────
 # GITHUB CONFIG  (set in Streamlit Secrets or .streamlit/secrets.toml)
 # ──────────────────────────────────────────────────────────────────────────────
 GITHUB_TOKEN     = st.secrets.get("GITHUB_TOKEN", "")
@@ -94,14 +89,34 @@ for k, v in [
     ("rcfg",               copy.deepcopy(DEFAULT_REGIONS)),
     ("week_quotas",        {}),
     ("summary_file_weeks", {}),
-    ("last_refresh",       None),   # ISO timestamp of last successful Drive fetch
-    ("_init_fetch",        False),  # guard: auto-fetch only once per session
-    ("_pending_fetch",   False),
-    ("_wk_month_key",    None),
-    ("_prev_dark",       None),   # detects theme-only reruns
+    ("last_refresh",       None),
+    ("_init_fetch",        False),
+    ("_pending_fetch",     False),
+    ("_wk_month_key",      None),
+    ("_prev_dark",         None),
 ]:
     if k not in st.session_state:
         st.session_state[k] = v
+
+# ──────────────────────────────────────────────────────────────────────────────
+# THEME  (must come before any CSS or color usage)
+# ──────────────────────────────────────────────────────────────────────────────
+dark = st.session_state.dark
+
+# Detect theme-only reruns so we can skip data operations
+_theme_just_changed = (st.session_state._prev_dark is not None and
+                       st.session_state._prev_dark != dark)
+st.session_state._prev_dark = dark
+
+BG   = "#1A1614" if dark else "#FEF9F5"
+CARD = "#242120" if dark else "#FFFFFF"
+BORD = "#3D3532" if dark else "#FED7AA"
+TX   = "#FAFAF9" if dark else "#1C1917"
+TX2  = "#A8A29E" if dark else "#78716C"
+OL   = "#431407" if dark else "#FEF3EA"
+OB   = "#7C2D12" if dark else "#FED7AA"
+PLT  = "plotly_dark" if dark else "plotly_white"
+ABSC = "#44403C" if dark else "#FEE2CC"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # REGION HELPERS
@@ -231,11 +246,9 @@ def parse_wide(df_raw, source_file=""):
                                  "investigator":inv,"source_file":source_file})
             except Exception: continue
     if not records:
-        st.warning(f"⚠️ **{source_file}**: 0 valid cases extracted. "
-                   f"Filtered — disqualified: {skip_disq}, incomplete: {skip_blank}.")
+        st.warning(f"⚠️ **{source_file}**: 0 valid cases. Filtered — disqualified:{skip_disq}, blank:{skip_blank}.")
         return EMPTY_DF.copy()
     return pd.DataFrame(records)
-
 
 def _next_int(row, start, look=6):
     for i in range(start, min(start+look, len(row))):
@@ -245,16 +258,14 @@ def _next_int(row, start, look=6):
         except Exception: pass
     return None
 
-
 def _week_start(week_num, year, month):
     weeks = get_weeks(year, month)
     return weeks[week_num-1]["start"] if 0<=week_num-1<len(weeks) else None
 
-
 def parse_summary_csv(df_raw, filename):
     month_num = next((v for k,v in MONTH_MAP.items() if k in filename.lower()), None)
     if not month_num:
-        st.warning(f"⚠️ Cannot determine month from **{filename}** — include month name.")
+        st.warning(f"⚠️ Cannot determine month from **{filename}**.")
         return
     year = (int(st.session_state.data["date"].str[:4].mode()[0])
             if not st.session_state.data.empty else datetime.today().year)
@@ -262,9 +273,9 @@ def parse_summary_csv(df_raw, filename):
              for c in row] for row in df_raw.values.tolist()]
     cur_week=in_meta=None; mcc_col=cs_col=None; loaded_weeks=[]
     for row in rows:
-        joined = " ".join(row).lower()
+        joined=" ".join(row).lower()
         for cell in row:
-            wm = re.match(r"^week\s+(\d+)$", cell.lower().strip())
+            wm=re.match(r"^week\s+(\d+)$",cell.lower().strip())
             if wm: cur_week=int(wm.group(1)); in_meta=False; mcc_col=cs_col=None; break
         if cur_week is None: continue
         if "meta del batch" in joined:
@@ -303,9 +314,6 @@ def parse_summary_csv(df_raw, filename):
                     st.session_state.week_quotas.setdefault(wst,{"MCC":{"total":0,"groups":{}},"CS":{"total":0,"groups":{}}})
                     st.session_state.week_quotas[wst][region]["groups"][name]=val
 
-# ──────────────────────────────────────────────────────────────────────────────
-# GOOGLE DRIVE FETCH
-# ──────────────────────────────────────────────────────────────────────────────
 def sheet_to_df(csv_text):
     try:
         return pd.read_csv(io.StringIO(csv_text), header=None, sep=',',
@@ -313,86 +321,62 @@ def sheet_to_df(csv_text):
     except Exception:
         return pd.DataFrame()
 
-
+# ──────────────────────────────────────────────────────────────────────────────
+# GITHUB FETCH
+# ──────────────────────────────────────────────────────────────────────────────
 def fetch_from_github(show_spinner=True):
-    """
-    Read the dashboard JSON file pushed by Apps Script from the private GitHub repo.
-    Detail sheets are processed before summary sheets (summary needs year from detail).
-    Returns True on success, False on failure.
-    """
     if not GITHUB_TOKEN or not GITHUB_REPO:
-        st.error("⚠️ **GITHUB_TOKEN** and **GITHUB_REPO** are not configured. "
-                 "Add them to Streamlit Secrets.")
+        st.error("⚠️ GITHUB_TOKEN and GITHUB_REPO not configured in Streamlit Secrets.")
         return False
-
     url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{GITHUB_DATA_PATH}"
-    headers = {
-        "Authorization": f"token {GITHUB_TOKEN}",
-        "Accept":        "application/vnd.github.v3.raw",  # returns raw file, not base64
-        "User-Agent":    "Ruvixx-Dashboard",
-    }
-
+    headers = {"Authorization": f"token {GITHUB_TOKEN}",
+               "Accept": "application/vnd.github.v3.raw", "User-Agent": "Ruvixx-Dashboard"}
     try:
         if show_spinner:
-            with st.spinner("🔄 Fetching data from GitHub…"):
+            with st.spinner("Fetching data from GitHub..."):
                 resp = requests.get(url, headers=headers, timeout=30)
         else:
             resp = requests.get(url, headers=headers, timeout=30)
-
-        if resp.status_code == 401:
-            st.error("🔑 GitHub authentication failed — check your GITHUB_TOKEN in Secrets.")
-            return False
         if resp.status_code == 404:
-            st.error("📂 Data file not found in GitHub. "
-                     "Run **pushToGitHub()** from the Apps Script editor first.")
+            st.error("Data file not found. Run pushToGitHub() from Apps Script first.")
+            return False
+        if resp.status_code == 401:
+            st.error("GitHub authentication failed — check GITHUB_TOKEN.")
             return False
         resp.raise_for_status()
         payload = resp.json()
-
     except requests.exceptions.Timeout:
-        st.error("⏱ Request timed out — try again in a moment.")
-        return False
+        st.error("Request timed out — try again."); return False
     except requests.exceptions.RequestException as e:
-        st.error(f"🔌 Connection error: {e}")
-        return False
+        st.error(f"Connection error: {e}"); return False
     except ValueError:
-        st.error("📄 Could not parse the data file. Check the GitHub file contents.")
-        return False
+        st.error("Could not parse data file."); return False
 
     if payload.get("status") != "ok":
-        st.error(f"⚠️ Data error: {payload.get('message','Unknown error')}")
-        return False
-
+        st.error(f"Data error: {payload.get('message','Unknown')}"); return False
     sheets = payload.get("sheets", {})
     if not sheets:
-        st.warning("No sheets found in the data file.")
-        return False
+        st.warning("No sheets found."); return False
 
-    # ── Reset all data ──────────────────────────────────────────────────────
     st.session_state.data               = EMPTY_DF.copy()
     st.session_state.files              = []
     st.session_state.week_quotas        = {}
     st.session_state.summary_file_weeks = {}
 
-    # ── 1. Detail sheets first ──────────────────────────────────────────────
     for sheet_name, csv_text in sheets.items():
-        if "summary" in sheet_name.lower() or not csv_text.strip():
-            continue
+        if "summary" in sheet_name.lower() or not csv_text.strip(): continue
         df = sheet_to_df(csv_text)
         if df.empty: continue
         fname  = f"{sheet_name}.csv"
         parsed = parse_wide(df, source_file=fname)
         if not parsed.empty:
             combined = pd.concat([st.session_state.data, parsed], ignore_index=True)
-            combined = combined.drop_duplicates(
-                subset=["case_id","investigator"], keep="first")
+            combined = combined.drop_duplicates(subset=["case_id","investigator"], keep="first")
             st.session_state.data = combined
             st.session_state.files.append(fname)
 
-    # ── 2. Summary sheets (need year inferred from detail data) ─────────────
     for sheet_name, csv_text in sheets.items():
-        if "summary" not in sheet_name.lower() or not csv_text.strip():
-            continue
+        if "summary" not in sheet_name.lower() or not csv_text.strip(): continue
         df = sheet_to_df(csv_text)
         if df.empty: continue
         fname = f"{sheet_name}.csv"
@@ -400,178 +384,26 @@ def fetch_from_github(show_spinner=True):
         st.session_state.files.append(fname)
 
     st.session_state.last_refresh = payload.get("timestamp", datetime.now().isoformat())
-    n_cases  = len(st.session_state.data)
-    n_sheets = len(sheets)
-    st.toast(f"✅ {n_cases} cases from {n_sheets} sheets", icon="📊")
+    st.toast(f"✅ {len(st.session_state.data)} cases loaded", icon="📊")
     return True
 
 # ──────────────────────────────────────────────────────────────────────────────
-# PENDING FETCH  (triggered by tab switch — skipped on theme-only reruns)
+# STARTUP: pending fetch (tab switch) — skipped on theme-only reruns
 # ──────────────────────────────────────────────────────────────────────────────
 if st.session_state._pending_fetch and not _theme_just_changed:
-    st.session_state._pending_fetch = False
-    st.session_state._wk_month_key = None   # force week to reset to current week
+    st.session_state._pending_fetch  = False
+    st.session_state._wk_month_key   = None
     fetch_from_github(show_spinner=False)
 
 # First-load auto-fetch
 if not st.session_state._init_fetch:
-    st.session_state._init_fetch = True   # set first so a crash doesn't loop
+    st.session_state._init_fetch = True
     if GITHUB_TOKEN and GITHUB_REPO:
         try:
             ok = fetch_from_github(show_spinner=False)
-            if ok:
-                st.rerun()
-        except Exception as _e:
-            st.warning(f"Auto-fetch failed on startup: {_e}. Press 🔄 Refresh to retry.")
-
-# ──────────────────────────────────────────────────────────────────────────────
-# PDF GENERATOR
-# ──────────────────────────────────────────────────────────────────────────────
-def generate_pdf(tab_key, cfg, tq, total, gap, pct, groups, invs, w_days,
-                 by_country, by_inv_stat, sel_week, sel_month, quota_from_summary):
-    if not PDF_OK: return None
-    CO=(249,115,22); CG=(22,163,74); CR=(239,68,68); CD=(28,25,23)
-    CGR=(120,113,108); CL=(254,243,234); CW=(255,255,255); CA=(249,246,242)
-    W=186
-    pdf=FPDF(); pdf.set_margins(12,12,12); pdf.set_auto_page_break(auto=True,margin=18)
-
-    def page_header():
-        pdf.set_fill_color(*CO); pdf.rect(0,0,210,24,'F')
-        pdf.set_font("Helvetica","B",14); pdf.set_text_color(*CW)
-        pdf.set_xy(12,5); pdf.cell(W,8,"RUVIXX  |  Case Investigation Report")
-        pdf.set_font("Helvetica","",8); pdf.set_xy(12,15)
-        pdf.cell(W,5,f"{safe(cfg['name'])}  ·  Week of {safe(sel_week['label'])}, "
-                    f"{sel_month['year']}  ·  {safe(cfg['contact'])}")
-        pdf.set_text_color(*CD); pdf.set_y(28)
-
-    def section(title):
-        if pdf.get_y()>240: pdf.add_page(); page_header(); pdf.ln(2)
-        pdf.set_font("Helvetica","B",9); pdf.set_text_color(*CO)
-        pdf.cell(W,6,safe(title),ln=True)
-        pdf.set_draw_color(*CO); pdf.set_line_width(0.4)
-        y=pdf.get_y(); pdf.line(12,y,198,y); pdf.ln(3); pdf.set_text_color(*CD)
-
-    def cell(w, h, txt="", **kw):
-        """pdf.cell wrapper that auto-applies safe() to every text string."""
-        pdf.cell(w, h, safe(str(txt)), **kw)
-        pdf.set_fill_color(*CO); pdf.set_text_color(*CW); pdf.set_font("Helvetica","B",8)
-        for h,w in zip(headers,widths): pdf.cell(w,7,safe(str(h)),border=0,fill=True,align='C')
-        pdf.ln(); pdf.set_text_color(*CD)
-
-    def tr(values,widths,aligns,even=True):
-        pdf.set_fill_color(*(CA if even else CW)); pdf.set_font("Helvetica","",8)
-        for v,w,a in zip(values,widths,aligns): pdf.cell(w,6,safe(str(v)),border=0,fill=True,align=a)
-        pdf.ln()
-
-    # Page 1
-    pdf.add_page(); page_header()
-    pdf.set_font("Helvetica","",7); pdf.set_text_color(*CGR)
-    summary_note = "  |  * Quotas from summary file" if quota_from_summary else ""
-    pdf.cell(W,4,safe(f"Generated: {datetime.now().strftime('%B %d, %Y  %H:%M')}{summary_note}"),
-             align='R',ln=True)
-    pdf.ln(4)
-    section("WEEKLY SUMMARY")
-    y0=pdf.get_y(); bw=45; bh=22; x0=12
-    metrics=[("Cases Generated",str(total),CO),("Quota Target",str(tq),CD),
-             ("Quota Gap",str(gap),CR if gap>0 else CG),
-             ("Progress",f"{pct}%",CG if pct>=100 else (CO if pct>=70 else CR))]
-    for i,(lbl,val,color) in enumerate(metrics):
-        x=x0+i*(bw+2); pdf.set_fill_color(*CL); pdf.rect(x,y0,bw,bh,'F')
-        pdf.set_font("Helvetica","",7); pdf.set_text_color(*CGR)
-        pdf.set_xy(x+3,y0+3); pdf.cell(bw-6,4,lbl)
-        pdf.set_font("Helvetica","B",16); pdf.set_text_color(*color)
-        pdf.set_xy(x+3,y0+8); pdf.cell(bw-6,10,val)
-    pdf.set_y(y0+bh+7); pdf.set_text_color(*CD)
-    section("BATCH QUOTA — GROUP BREAKDOWN")
-    th(["Group","Quota","Done","Remaining","Prog %","Status"],[72,18,18,24,22,32])
-    for i,g in enumerate(groups):
-        left=max(0,g["quota"]-g["done"]); pg=min(100,round(g["done"]/g["quota"]*100)) if g["quota"] else 0
-        status="COMPLETE" if left==0 else ("ON TRACK" if g["done"]/max(g["quota"],1)>=0.6 else "BEHIND")
-        tr([safe(g["label"]), g["quota"],g["done"],left,f"{pg}%",status],[72,18,18,24,22,32],
-           ['L','C','C','C','C','C'],even=i%2==0)
-    pdf.set_font("Helvetica","B",8); pdf.set_text_color(*CO)
-    for v,w,a in zip(["TOTAL",str(tq),str(sum(g["done"] for g in groups)),str(gap),f"{pct}%",""],
-                     [72,18,18,24,22,32],['L','C','C','C','C','C']):
-        pdf.cell(w,6,v,fill=False,align=a)
-    pdf.ln(10); pdf.set_text_color(*CD)
-    section("KEY HIGHLIGHTS")
-    items=[f"Batch in progress: {total}/{tq} cases — {gap} remaining."]
-    for g in groups:
-        left=max(0,g["quota"]-g["done"])
-        items.append(f"  {safe(g['label'])}: {g['done']}/{g['quota']} — {'All complete' if left==0 else f'{left} left'}")
-    if invs:
-        tp=round(invs[0]['total']/total*100) if total else 0
-        items.append(f"Top investigator: {safe(invs[0]['name'])} — {invs[0]['total']} cases ({tp}%).")
-    pdf.set_font("Helvetica","",8)
-    for item in items:
-        prefix="    " if item.startswith("  ") else ""
-        pdf.cell(6,5,"-"); pdf.cell(W-6,5,safe(prefix+item.strip()),ln=True)
-    # Page 2
-    pdf.add_page(); page_header(); pdf.ln(2)
-    section("INVESTIGATOR PERFORMANCE — DAILY BREAKDOWN")
-    dh=[safe(wd["label"]) for wd in w_days]
-    iw=[34,15]+[19]*len(w_days)+[15,15,12]
-    th(["Investigator","Role"]+dh+["Week","Month","Status"],iw)
-    for ri,inv in enumerate(invs):
-        role="Support" if inv["support"] else "Investigator"
-        bl,_,_=(("Support","","") if inv["support"] else badge_for(inv["total"],cfg["weekly_min"],cfg["weekly_ideal"]))
-        dvs=[str(inv["by_day"].get(wd["ds"],0) or "—") for wd in w_days]
-        tr([safe(inv["name"]),role]+dvs+[inv["total"],inv["month_total"],bl],
-           iw,['L','C']+['C']*len(w_days)+['C','C','C'],even=ri%2==0)
-    pdf.ln(4)
-    pdf.set_font("Helvetica","B",8); pdf.set_text_color(*CGR)
-    pdf.cell(iw[0]+iw[1],6,"Daily totals →",align='R')
-    for wd in w_days:
-        dt=sum(inv["by_day"].get(wd["ds"],0) for inv in invs)
-        pdf.cell(19,6,str(dt),align='C')
-    pdf.ln(8); pdf.set_text_color(*CD)
-    section("DISTRIBUTION — CASES BY COUNTRY & INVESTIGATOR")
-    hw=88; gx=10; xL=12; xR=12+hw+gx; y0=pdf.get_y()
-    cw_L=[53,18,17]; cw_R=[54,18,16]
-    pdf.set_fill_color(*CO); pdf.set_text_color(*CW); pdf.set_font("Helvetica","B",8)
-    pdf.set_xy(xL,y0)
-    for h,w in zip(["Country","Cases","%"],cw_L): pdf.cell(w,7,h,border=0,fill=True,align='C')
-    pdf.set_xy(xR,y0)
-    for h,w in zip(["Investigator","Cases","%"],cw_R): pdf.cell(w,7,h,border=0,fill=True,align='C')
-    pdf.set_text_color(*CD)
-    cl=list(by_country.items()); yr=y0+7
-    for ri in range(max(len(cl),len(by_inv_stat))):
-        fill=CA if ri%2==0 else CW; pdf.set_fill_color(*fill); pdf.set_font("Helvetica","",8)
-        if ri<len(cl):
-            country,cnt=cl[ri]; cp=round(cnt/total*100) if total else 0
-            pdf.set_xy(xL,yr)
-            pdf.cell(cw_L[0],6,safe(country),border=0,fill=True,align='L')
-            pdf.cell(cw_L[1],6,str(cnt),border=0,fill=True,align='C')
-            pdf.cell(cw_L[2],6,f"{cp}%",border=0,fill=True,align='C')
-        if ri<len(by_inv_stat):
-            s=by_inv_stat[ri]; pdf.set_xy(xR,yr)
-            pdf.cell(cw_R[0],6,safe(s["name"]),border=0,fill=True,align='L')
-            pdf.cell(cw_R[1],6,str(s["total"]),border=0,fill=True,align='C')
-            pdf.cell(cw_R[2],6,f"{s['pct']}%",border=0,fill=True,align='C')
-        yr+=6
-    pdf.set_y(-14); pdf.set_font("Helvetica","I",7); pdf.set_text_color(*CGR)
-    pdf.cell(W,5,f"Ruvixx  ·  {safe(cfg['name'])}  ·  Week of {safe(sel_week['label'])}, "
-               f"{sel_month['year']}  ·  Confidential",align='C')
-    return bytes(pdf.output())
-
-# ──────────────────────────────────────────────────────────────────────────────
-# THEME
-# ──────────────────────────────────────────────────────────────────────────────
-dark = st.session_state.dark
-
-# Detect theme-only reruns — skip data operations if only theme changed
-_theme_just_changed = (st.session_state._prev_dark is not None and
-                       st.session_state._prev_dark != dark)
-st.session_state._prev_dark = dark
-BG   = "#1A1614" if dark else "#FEF9F5"
-CARD = "#242120" if dark else "#FFFFFF"
-BORD = "#3D3532" if dark else "#FED7AA"
-TX   = "#FAFAF9" if dark else "#1C1917"
-TX2  = "#A8A29E" if dark else "#78716C"
-OL   = "#431407" if dark else "#FEF3EA"
-OB   = "#7C2D12" if dark else "#FED7AA"
-PLT  = "plotly_dark" if dark else "plotly_white"
-ABSC = "#44403C" if dark else "#FEE2CC"
+            if ok: st.rerun()
+        except Exception as e:
+            st.warning(f"Auto-fetch failed: {e}. Press Refresh to retry.")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # CSS
@@ -597,11 +429,6 @@ st.markdown(f"""
   [data-testid="stButton"] button[kind="secondary"] {{
       background:{CARD} !important;color:{TX} !important;border:1px solid {BORD} !important; }}
   [data-testid="stButton"] button[kind="secondary"]:hover {{
-      background:{OL} !important;border-color:{ORG} !important;color:{ORG} !important; }}
-  [data-testid="stDownloadButton"] button {{
-      background:{CARD} !important;color:{TX} !important;
-      border:1px solid {BORD} !important;border-radius:6px !important; }}
-  [data-testid="stDownloadButton"] button:hover {{
       background:{OL} !important;border-color:{ORG} !important;color:{ORG} !important; }}
   hr {{ border-color:{BORD};margin:6px 0; }}
   p,span,label,div {{ color:{TX}; }}
@@ -698,6 +525,7 @@ with st.sidebar:
 cfg   = st.session_state.rcfg[st.session_state.tab]
 pills = region_pills(st.session_state.tab)
 cl,cm,cs_,cr,ct = st.columns([1.4,1,1,4.5,0.5])
+
 with cl:
     st.markdown(f"""
     <div style="display:flex;align-items:center;gap:8px;padding:5px 0">
@@ -708,20 +536,25 @@ with cl:
         <div style="font-size:8px;color:{TX2};letter-spacing:.06em;text-transform:uppercase">Case Investigation</div>
       </div>
     </div>""", unsafe_allow_html=True)
+
 with cm:
     if st.button("México CC", key="btn_mcc",
                  type="primary" if st.session_state.tab=="MCC" else "secondary",
                  use_container_width=True):
-        st.session_state.tab = "MCC"
+        st.session_state.tab           = "MCC"
         st.session_state._pending_fetch = True
+        st.session_state._wk_month_key  = None
         st.rerun()
+
 with cs_:
     if st.button("Cono Sur", key="btn_cs",
                  type="primary" if st.session_state.tab=="CS" else "secondary",
                  use_container_width=True):
-        st.session_state.tab = "CS"
+        st.session_state.tab           = "CS"
         st.session_state._pending_fetch = True
+        st.session_state._wk_month_key  = None
         st.rerun()
+
 with cr:
     ph="".join(f'<span style="font-size:9px;font-weight:700;background:{ORG};color:white;'
                f'border-radius:3px;padding:1px 4px;margin:0 1px">{p}</span>' for p in pills)
@@ -731,9 +564,11 @@ with cr:
       <span style="width:7px;height:7px;border-radius:50%;background:{ORG};display:inline-block;flex-shrink:0"></span>
       {cfg["name"]} · {cfg["contact"]}  {ph}
     </div>""", unsafe_allow_html=True)
+
 with ct:
-    if st.button("🌙" if not dark else "☀️",key="theme_btn",use_container_width=True):
-        st.session_state.dark=not st.session_state.dark; st.rerun()
+    if st.button("🌙" if not dark else "☀️", key="theme_btn", use_container_width=True):
+        st.session_state.dark = not dark
+        st.rerun()
 
 st.markdown(f'<hr style="border-color:{BORD}">', unsafe_allow_html=True)
 
@@ -744,18 +579,18 @@ raw_data  = st.session_state.data
 full_data = with_region(raw_data)
 has_data  = not full_data.empty
 
-months_avail=[]
+months_avail = []
 if has_data:
     for ms in sorted(full_data["date"].str[:7].unique()):
-        y,m=int(ms[:4]),int(ms[5:7])
+        y,m = int(ms[:4]),int(ms[5:7])
         months_avail.append({"year":y,"month":m,"label":datetime(y,m,1).strftime("%B %Y")})
 if not months_avail:
-    t=datetime.today()
-    months_avail=[{"year":t.year,"month":t.month,"label":t.strftime("%B %Y")}]
+    t = datetime.today()
+    months_avail = [{"year":t.year,"month":t.month,"label":t.strftime("%B %Y")}]
 
 today_label  = datetime.today().strftime("%B %Y")
 avail_labels = [m["label"] for m in months_avail]
-default_m_idx = (avail_labels.index(today_label) if today_label in avail_labels else len(months_avail)-1)
+default_m_idx = avail_labels.index(today_label) if today_label in avail_labels else len(months_avail)-1
 
 c1,c2,c3,c4 = st.columns([2.2, 2.4, 1.0, 3.4])
 
@@ -771,26 +606,28 @@ with c2:
         else f"Week of {w['label']}"
         for w in weeks
     ]
-    # Include tab in key so switching tabs always resets week to current
+    # Reset week to current when month or tab changes (include tab in key)
     month_key = f"{sel_month['year']}-{sel_month['month']}-{st.session_state.tab}"
     if st.session_state._wk_month_key != month_key:
         st.session_state._wk_month_key = month_key
         st.session_state["sel_week"]   = w_disp[current_week_idx(weeks)]
+
     sel_w_disp = st.selectbox("Week", w_disp, label_visibility="collapsed", key="sel_week")
     sel_week   = weeks[w_disp.index(sel_w_disp)]
 
 with c3:
     if st.button("🔄 Refresh", key="refresh_btn", type="secondary",
                  use_container_width=True,
-                 help="Pull the latest data pushed by Apps Script to GitHub"):
+                 help="Pull the latest data from GitHub"):
         ok = fetch_from_github(show_spinner=True)
-        if ok: st.rerun()
+        if ok:
+            st.session_state._wk_month_key = None
+            st.rerun()
 
 with c4:
     if st.session_state.last_refresh:
         try:
-            ts_raw = st.session_state.last_refresh.replace("Z","+00:00")
-            ts     = datetime.fromisoformat(ts_raw)
+            ts  = datetime.fromisoformat(st.session_state.last_refresh.replace("Z","+00:00"))
             ts_str = ts.strftime("%b %d, %H:%M UTC")
         except Exception:
             ts_str = str(st.session_state.last_refresh)[:16]
@@ -802,8 +639,7 @@ with c4:
             f'Last push: <b>{ts_str}</b><br>'
             f'{len(raw_data)} cases &nbsp;·&nbsp; '
             f'MCC: <b style="color:{ORG}">{n_mcc}</b> &nbsp;·&nbsp; '
-            f'CS: <b style="color:{ORG}">{n_cs}</b></div>',
-            unsafe_allow_html=True)
+            f'CS: <b style="color:{ORG}">{n_cs}</b></div>', unsafe_allow_html=True)
     elif GITHUB_TOKEN and GITHUB_REPO:
         st.markdown(f'<div style="font-size:11px;color:{TX2};padding-top:8px">'
                     f'<span style="color:{ORG}">○ Not loaded</span> — press Refresh</div>',
@@ -824,10 +660,11 @@ w_data = (r_data[(r_data["date"]>=sel_week["start"])&(r_data["date"]<=sel_week["
 m_pfx  = f"{sel_month['year']:04d}-{sel_month['month']:02d}"
 m_data = r_data[r_data["date"].str.startswith(m_pfx)] if not r_data.empty else pd.DataFrame()
 
-total=len(w_data); gap=max(0,tq-total); pct=min(100,round(total/tq*100)) if tq else 0
-groups=[{**g,"done":len(w_data[w_data["country"].isin(g["countries"])]) if not w_data.empty else 0}
-        for g in cfg["groups"]]
-invs=[]
+total = len(w_data); gap=max(0,tq-total); pct=min(100,round(total/tq*100)) if tq else 0
+
+groups = [{**g,"done":len(w_data[w_data["country"].isin(g["countries"])]) if not w_data.empty else 0}
+          for g in cfg["groups"]]
+invs = []
 if not w_data.empty:
     for inv_name,grp in sorted(w_data.groupby("investigator"),key=lambda x:-len(x[1])):
         invs.append({"name":inv_name,"total":len(grp),
@@ -845,42 +682,40 @@ while d_cur<=d_end:
 by_country=(w_data.groupby("country").size().sort_values(ascending=False).to_dict()
             if not w_data.empty else {})
 by_inv_stat=[{"name":i["name"],"total":i["total"],
-              "pct":round(i["total"]/total*100) if total else 0,
-              "support":i["support"]} for i in invs]
+              "pct":round(i["total"]/total*100) if total else 0,"support":i["support"]}
+             for i in invs]
 quota_from_summary=bool(st.session_state.week_quotas.get(sel_week["start"]))
 
 # ──────────────────────────────────────────────────────────────────────────────
-# METRIC ROW + PDF
+# METRIC ROW
 # ──────────────────────────────────────────────────────────────────────────────
 src_tag=(f' <span style="font-size:9px;color:{GRN};background:#DCFCE7;'
-         f'padding:1px 6px;border-radius:10px">★ summary</span>' if quota_from_summary else "")
-mrow_l = st.columns([1])[0]
-with mrow_l:
-    st.markdown(f"""
-    <div style="display:flex;justify-content:flex-end;align-items:center;gap:28px;padding:8px 0 12px">
-      <div style="text-align:center">
-        <div style="font-size:22px;font-weight:800;color:{ORG};line-height:1">{total}</div>
-        <div style="font-size:9px;color:{TX2};text-transform:uppercase;letter-spacing:.06em">Cases Generated</div>
-      </div>
-      <div style="text-align:center">
-        <div style="font-size:22px;font-weight:800;color:{ORG};line-height:1">{gap}</div>
-        <div style="font-size:9px;color:{TX2};text-transform:uppercase;letter-spacing:.06em">Quota Gap</div>
-      </div>
-      <div style="text-align:center">
-        <div style="font-size:22px;font-weight:800;color:{ORG};line-height:1">{pct}%{src_tag}</div>
-        <div style="font-size:9px;color:{TX2};text-transform:uppercase;letter-spacing:.06em">Quota Progress</div>
-      </div>
-      <div style="text-align:right">
-        <div style="font-size:12px;font-weight:700;color:{TX}">Trimble LATAM</div>
-        <div style="font-size:10px;color:{TX2}">{sel_week["label"]}, {sel_month["year"]}</div>
-      </div>
-    </div>""", unsafe_allow_html=True)
-
+         f'padding:1px 6px;border-radius:10px">★ summary</span>'
+         if quota_from_summary else "")
+st.markdown(f"""
+<div style="display:flex;justify-content:flex-end;align-items:center;gap:28px;padding:8px 0 12px">
+  <div style="text-align:center">
+    <div style="font-size:22px;font-weight:800;color:{ORG};line-height:1">{total}</div>
+    <div style="font-size:9px;color:{TX2};text-transform:uppercase;letter-spacing:.06em">Cases Generated</div>
+  </div>
+  <div style="text-align:center">
+    <div style="font-size:22px;font-weight:800;color:{ORG};line-height:1">{gap}</div>
+    <div style="font-size:9px;color:{TX2};text-transform:uppercase;letter-spacing:.06em">Quota Gap</div>
+  </div>
+  <div style="text-align:center">
+    <div style="font-size:22px;font-weight:800;color:{ORG};line-height:1">{pct}%{src_tag}</div>
+    <div style="font-size:9px;color:{TX2};text-transform:uppercase;letter-spacing:.06em">Quota Progress</div>
+  </div>
+  <div style="text-align:right">
+    <div style="font-size:12px;font-weight:700;color:{TX}">Trimble LATAM</div>
+    <div style="font-size:10px;color:{TX2}">{sel_week["label"]}, {sel_month["year"]}</div>
+  </div>
+</div>""", unsafe_allow_html=True)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # MAIN ROW
 # ──────────────────────────────────────────────────────────────────────────────
-mc1,mc2,mc3=st.columns([1.5,3,2])
+mc1,mc2,mc3 = st.columns([1.5,3,2])
 with mc1:
     with st.container(border=True):
         fig_g=go.Figure(go.Pie(values=[max(total,0.0001),max(gap,0.0001)],hole=0.72,
@@ -894,6 +729,7 @@ with mc1:
         st.plotly_chart(fig_g,use_container_width=True,config={"displayModeBar":False})
         st.markdown(f'<p style="text-align:center;font-size:12px;font-weight:700;'
                     f'color:{ORG};margin-top:-20px">{gap} cases to go</p>',unsafe_allow_html=True)
+
 with mc2:
     with st.container(border=True):
         st.markdown('<div class="sec-lbl">Batch Quota · Group Breakdown</div>',unsafe_allow_html=True)
@@ -921,6 +757,7 @@ with mc2:
           <span>Target Batch <b style="color:{TX}">{tq} cases</b></span>
           <span>Remaining <b style="color:{ORG}">{gap} cases</b></span>
         </div>""",unsafe_allow_html=True)
+
 with mc3:
     with st.container(border=True):
         st.markdown('<div class="sec-lbl">⚡ Key Highlights</div>',unsafe_allow_html=True)
@@ -1017,7 +854,8 @@ else:
                 day_vals=[inv["by_day"].get(wd["ds"],0) for wd in w_days]
                 with ex1:
                     st.markdown(f'<div style="font-size:10px;font-weight:700;color:{ORG};'
-                                f'text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px">Daily (week)</div>',unsafe_allow_html=True)
+                                f'text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px">Daily (week)</div>',
+                                unsafe_allow_html=True)
                     fig_d=go.Figure(go.Bar(x=[wd["label"] for wd in w_days],y=day_vals,
                                            marker_color=[dot_color(n,cfg["daily_min"],cfg["daily_ideal"]) for n in day_vals],
                                            marker_line_width=0))
@@ -1027,12 +865,13 @@ else:
                     st.plotly_chart(fig_d,use_container_width=True,config={"displayModeBar":False})
                 with ex2:
                     st.markdown(f'<div style="font-size:10px;font-weight:700;color:{ORG};'
-                                f'text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px">By country</div>',unsafe_allow_html=True)
+                                f'text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px">By country</div>',
+                                unsafe_allow_html=True)
                     if not w_data.empty:
                         ic=(w_data[w_data["investigator"]==inv["name"]].groupby("country").size().sort_values().to_dict())
                         if ic:
-                            fig_c=go.Figure(go.Bar(x=list(ic.values()),y=list(ic.keys()),orientation="h",
-                                                   marker_color=ORG,marker_line_width=0))
+                            fig_c=go.Figure(go.Bar(x=list(ic.values()),y=list(ic.keys()),
+                                                   orientation="h",marker_color=ORG,marker_line_width=0))
                             fig_c.update_layout(height=max(120,len(ic)*28),margin=dict(t=5,b=5,l=5,r=5),
                                                 paper_bgcolor="rgba(0,0,0,0)",plot_bgcolor="rgba(0,0,0,0)",
                                                 template=PLT,xaxis=dict(showgrid=True),yaxis=dict(showgrid=False))
@@ -1099,7 +938,8 @@ with bc1:
                                    xaxis=dict(showgrid=True,gridcolor="rgba(249,115,22,0.1)"),
                                    yaxis=dict(showgrid=False,autorange="reversed"))
             st.plotly_chart(fig_ctr,use_container_width=True,config={"displayModeBar":False})
-        else: st.markdown(empty_msg(),unsafe_allow_html=True)
+        else:
+            st.markdown(empty_msg(),unsafe_allow_html=True)
 
 with bc2:
     with st.container(border=True):
@@ -1114,4 +954,5 @@ with bc2:
                                    xaxis=dict(showgrid=True,gridcolor="rgba(249,115,22,0.1)"),
                                    yaxis=dict(showgrid=False,autorange="reversed"))
             st.plotly_chart(fig_inv,use_container_width=True,config={"displayModeBar":False})
-        else: st.markdown(empty_msg(),unsafe_allow_html=True)
+        else:
+            st.markdown(empty_msg(),unsafe_allow_html=True)

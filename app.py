@@ -85,7 +85,7 @@ for k, v in [
     ("data",               EMPTY_DF),
     ("files",              []),
     ("tab",                "MCC"),
-    ("dark",               False),
+    ("dark",               True),
     ("rcfg",               copy.deepcopy(DEFAULT_REGIONS)),
     ("week_quotas",        {}),
     ("summary_file_weeks", {}),

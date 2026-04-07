@@ -449,7 +449,9 @@ def generate_pdf(tab_key, cfg, tq, total, gap, pct, groups, invs, w_days,
         pdf.set_draw_color(*CO); pdf.set_line_width(0.4)
         y=pdf.get_y(); pdf.line(12,y,198,y); pdf.ln(3); pdf.set_text_color(*CD)
 
-    def th(headers,widths):
+    def cell(w, h, txt="", **kw):
+        """pdf.cell wrapper that auto-applies safe() to every text string."""
+        pdf.cell(w, h, safe(str(txt)), **kw)
         pdf.set_fill_color(*CO); pdf.set_text_color(*CW); pdf.set_font("Helvetica","B",8)
         for h,w in zip(headers,widths): pdf.cell(w,7,safe(str(h)),border=0,fill=True,align='C')
         pdf.ln(); pdf.set_text_color(*CD)

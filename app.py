@@ -696,15 +696,19 @@ with cl:
       </div>
     </div>""", unsafe_allow_html=True)
 with cm:
-    if st.button("México CC",key="btn_mcc",
+    if st.button("México CC", key="btn_mcc",
                  type="primary" if st.session_state.tab=="MCC" else "secondary",
                  use_container_width=True):
-        st.session_state.tab="MCC"; st.rerun()
+        st.session_state.tab = "MCC"
+        fetch_from_github(show_spinner=True)
+        st.rerun()
 with cs_:
-    if st.button("Cono Sur",key="btn_cs",
+    if st.button("Cono Sur", key="btn_cs",
                  type="primary" if st.session_state.tab=="CS" else "secondary",
                  use_container_width=True):
-        st.session_state.tab="CS"; st.rerun()
+        st.session_state.tab = "CS"
+        fetch_from_github(show_spinner=True)
+        st.rerun()
 with cr:
     ph="".join(f'<span style="font-size:9px;font-weight:700;background:{ORG};color:white;'
                f'border-radius:3px;padding:1px 4px;margin:0 1px">{p}</span>' for p in pills)

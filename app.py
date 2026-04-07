@@ -96,7 +96,8 @@ for k, v in [
     ("summary_file_weeks", {}),
     ("last_refresh",       None),   # ISO timestamp of last successful Drive fetch
     ("_init_fetch",        False),  # guard: auto-fetch only once per session
-    ("_pending_fetch",   False),  # triggers fetch at top of next rerun
+    ("_pending_fetch",   False),
+    ("_wk_month_key",    None),
 ]:
     if k not in st.session_state:
         st.session_state[k] = v

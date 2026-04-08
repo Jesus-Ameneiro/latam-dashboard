@@ -59,7 +59,7 @@ DEFAULT_REGIONS = {
             {"label": "Honduras",                "countries": ["Honduras"],                                 "quota": 1},
             {"label": "Belize",                  "countries": ["Belize"],                                   "quota": 1},
         ],
-        "daily_min": 5, "daily_ideal": 8, "weekly_min": 25, "weekly_ideal": 40, "support": ["Luis"],
+        "daily_min": 5, "daily_ideal": 7, "weekly_min": 26, "weekly_ideal": 35, "support": ["Luis"],
     },
     "CS": {
         "name": "Cono Sur", "contact": "Ignacio Duce",
@@ -72,7 +72,7 @@ DEFAULT_REGIONS = {
             {"label": "Paraguay",           "countries": ["Paraguay"],           "quota": 5},
             {"label": "Uruguay",            "countries": ["Uruguay"],            "quota": 5},
         ],
-        "daily_min": 5, "daily_ideal": 8, "weekly_min": 25, "weekly_ideal": 40, "support": [],
+        "daily_min": 5, "daily_ideal": 7, "weekly_min": 26, "weekly_ideal": 35, "support": [],
     },
 }
 
@@ -208,16 +208,18 @@ def fmt_day(ds):
     return f"{d.strftime('%b')} {d.day}"
 
 def dot_color(n, mn, ideal):
-    if not n: return "#FEE2CC"
-    if n >= ideal: return GRN
-    if n >= mn: return ORG
-    return RED
+    """mn=5 (min), ideal=7 (recommended). ≤4=critical, 5-6=minimum, ≥7=recommended."""
+    if not n:      return "#FEE2CC"       # absent
+    if n >= ideal: return GRN             # ≥7 recommended
+    if n >= mn:    return ORG             # 5-6 minimum
+    return RED                            # 1-4 critical
 
 def badge_for(total, wmin, wideal):
-    if not total:       return "No data",  "#FEE2E2", RED
-    if total >= wideal: return "Ideal",     "#DCFCE7", GRN
-    if total >= wmin:   return "Above min", "#FEF9C3", "#CA8A04"
-    return "Below min", "#FEE2E2", RED
+    """wmin=26, wideal=35. ≤25=critical, 26-34=minimum, ≥35=recommended."""
+    if not total:         return "No data",     "#FEE2E2", RED
+    if total >= wideal:   return "Recommended",  "#DCFCE7", GRN
+    if total >= wmin:     return "Minimum",      "#FEF9C3", "#CA8A04"
+    return "Critical", "#FEE2E2", RED
 
 # ──────────────────────────────────────────────────────────────────────────────
 # FILE PARSERS
@@ -654,11 +656,24 @@ with c4:
 # ──────────────────────────────────────────────────────────────────────────────
 cfg    = st.session_state.rcfg[st.session_state.tab]
 tq     = effective_quota(st.session_state.tab, sel_week["start"])
-r_data = full_data[full_data["region"]==st.session_state.tab].copy() if has_data else pd.DataFrame()
-w_data = (r_data[(r_data["date"]>=sel_week["start"])&(r_data["date"]<=sel_week["end"])]
-          if not r_data.empty else pd.DataFrame())
+
+# Explicit country set for this region — prevents cross-region bleed
+region_countries = set(c for g in cfg["groups"] for c in g["countries"])
+
+# Filter strictly: region column AND country must belong to this region's config
+r_data = (full_data[
+    (full_data["region"] == st.session_state.tab) &
+    (full_data["country"].isin(region_countries))
+].copy() if has_data else pd.DataFrame())
+
+w_data = (r_data[
+    (r_data["date"] >= sel_week["start"]) &
+    (r_data["date"] <= sel_week["end"])
+] if not r_data.empty else pd.DataFrame())
+
 m_pfx  = f"{sel_month['year']:04d}-{sel_month['month']:02d}"
-m_data = r_data[r_data["date"].str.startswith(m_pfx)] if not r_data.empty else pd.DataFrame()
+m_data = (r_data[r_data["date"].str.startswith(m_pfx)]
+          if not r_data.empty else pd.DataFrame())
 
 total = len(w_data); gap=max(0,tq-total); pct=min(100,round(total/tq*100)) if tq else 0
 
@@ -786,7 +801,7 @@ st.markdown("<br>",unsafe_allow_html=True)
 st.markdown(f"""
 <div style="font-size:10px;font-weight:700;color:{TX2};letter-spacing:.07em;
             text-transform:uppercase;margin-bottom:8px">
-  👤 Investigator Quota Performance — Min {cfg['daily_min']}/day · Ideal {cfg['daily_ideal']}/day · {sel_week['label']}
+  👤 Investigator Quota Performance — Critical ≤4/day · Min {cfg['daily_min']}–{cfg['daily_ideal']-1}/day · Recommended ≥{cfg['daily_ideal']}/day · {sel_week['label']}
   <span style="font-size:10px;font-weight:400;background:{OL};padding:2px 8px;
                border-radius:20px;border:1px dashed {OB};margin-left:8px">click card to expand ↓</span>
 </div>""",unsafe_allow_html=True)
@@ -820,8 +835,10 @@ def make_card(inv):
     legend="".join(
         f'<span style="display:flex;align-items:center;gap:3px;font-size:10px;color:{TX2}">'
         f'<span style="width:9px;height:9px;background:{lc};border-radius:2px;display:inline-block"></span>{ll}</span>'
-        for lc,ll in [(GRN,f'≥{cfg["daily_ideal"]} ideal'),(ORG,f'{cfg["daily_min"]}–{cfg["daily_ideal"]-1} min'),
-                      (RED,f'1–{cfg["daily_min"]-1} low'),("#FEE2CC","0 absent")])
+        for lc,ll in [(GRN,f'≥{cfg["daily_ideal"]} recommended'),
+                      (ORG,f'{cfg["daily_min"]}–{cfg["daily_ideal"]-1} minimum'),
+                      (RED,f'1–{cfg["daily_min"]-1} critical'),
+                      ("#FEE2CC","0 absent")])
     return f"""
     <div style="background:{CARD};border:1px solid {BORD};border-radius:14px;padding:14px 16px;margin-bottom:4px">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:11px">

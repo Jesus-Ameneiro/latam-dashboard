@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime, date, timedelta
-import re, io, copy, unicodedata, requests
+import re, io, copy, requests
 
 # ──────────────────────────────────────────────────────────────────────────────
 # PAGE CONFIG
@@ -198,10 +198,18 @@ def get_weeks(year, month):
     return weeks
 
 def current_week_idx(weeks):
+    """Return index of week containing today.
+    Fallback: most recently completed week.
+    If all weeks are future: return 0."""
     today_str = date.today().strftime("%Y-%m-%d")
-    for i,w in enumerate(weeks):
-        if w["start"] <= today_str <= w["end"]: return i
-    return max(0, len(weeks)-1)
+    for i, w in enumerate(weeks):
+        if w["start"] <= today_str <= w["end"]:
+            return i
+    # Find last week whose end date has already passed
+    past = [(i, w) for i, w in enumerate(weeks) if w["end"] < today_str]
+    if past:
+        return past[-1][0]
+    return 0  # all weeks are future — show first
 
 def fmt_day(ds):
     d = datetime.strptime(ds, "%Y-%m-%d")
@@ -269,7 +277,8 @@ def parse_summary_csv(df_raw, filename):
     if not month_num:
         st.warning(f"⚠️ Cannot determine month from **{filename}**.")
         return
-    year = (int(st.session_state.data["date"].str[:4].mode()[0])
+    # Use max year in data (most recent) to avoid wrong year on Dec→Jan crossover
+    year = (int(st.session_state.data["date"].str[:4].max())
             if not st.session_state.data.empty else datetime.today().year)
     rows = [[str(c).strip() if c is not None and str(c) not in ("nan","None","NaT","") else ""
              for c in row] for row in df_raw.values.tolist()]
@@ -677,8 +686,20 @@ m_data = (r_data[r_data["date"].str.startswith(m_pfx)]
 
 total = len(w_data); gap=max(0,tq-total); pct=min(100,round(total/tq*100)) if tq else 0
 
-groups = [{**g,"done":len(w_data[w_data["country"].isin(g["countries"])]) if not w_data.empty else 0}
-          for g in cfg["groups"]]
+# Compute effective quota per group (summary-derived if available, else config)
+sg = (st.session_state.week_quotas
+      .get(sel_week["start"], {})
+      .get(st.session_state.tab, {})
+      .get("groups", {}))
+
+groups = []
+for g in cfg["groups"]:
+    sq  = next((v for sn, v in sg.items()
+                if any(c.lower() in sn.lower() or sn.lower() in c.lower()
+                       for c in g["countries"])), None)
+    dq  = sq if sq else g["quota"]
+    done = len(w_data[w_data["country"].isin(g["countries"])]) if not w_data.empty else 0
+    groups.append({**g, "done": done, "eff_quota": dq})
 invs = []
 if not w_data.empty:
     for inv_name,grp in sorted(w_data.groupby("investigator"),key=lambda x:-len(x[1])):
@@ -750,16 +771,16 @@ with mc2:
         st.markdown('<div class="sec-lbl">Batch Quota · Group Breakdown</div>',unsafe_allow_html=True)
         sg=st.session_state.week_quotas.get(sel_week["start"],{}).get(st.session_state.tab,{}).get("groups",{})
         for g in groups:
-            sq=next((v for sn,v in sg.items() if any(c.lower() in sn.lower() or sn.lower() in c.lower()
-                     for c in g["countries"])),None)
-            dq=sq if sq else g["quota"]; left=max(0,dq-g["done"])
-            bp=min(100,g["done"]/dq*100) if dq else 0
-            bc=GRN if left==0 else (ORG if g["done"]/max(dq,1)>=0.6 else RED)
-            lbl="✓ done" if left==0 else f"{left} left"
+            dq   = g["eff_quota"]
+            left = max(0, dq - g["done"])
+            bp   = min(100, g["done"] / dq * 100) if dq else 0
+            bc   = GRN if left==0 else (ORG if g["done"]/max(dq,1)>=0.6 else RED)
+            lbl  = "✓ done" if left==0 else f"{left} left"
+            star = ' <span style="font-size:9px;color:' + GRN + '"> ★</span>' if g["eff_quota"] != g["quota"] else ""
             st.markdown(f"""
             <div style="margin-bottom:9px">
               <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:3px">
-                <span style="color:{TX}">{g['label']}{'<span style="font-size:9px;color:'+GRN+'"> ★</span>' if sq else ''}</span>
+                <span style="color:{TX}">{g['label']}{star}</span>
                 <span style="color:{TX2}">{g['done']}/{dq}
                   <span style="font-weight:700;color:{bc}">{lbl}</span>
                 </span>
@@ -778,8 +799,10 @@ with mc3:
         st.markdown('<div class="sec-lbl">⚡ Key Highlights</div>',unsafe_allow_html=True)
         hl=[{"c":ORG,"t":"Batch in progress","s":f"{total}/{tq} — {gap} cases remaining"}]
         for g in groups:
-            left=max(0,g["quota"]-g["done"]); hc=GRN if left==0 else (ORG if g["done"]/max(g["quota"],1)>=0.6 else RED)
-            hl.append({"c":hc,"t":g["label"],"s":f"{g['done']}/{g['quota']} — {'All complete ✓' if left==0 else f'{left} cases left'}"})
+            left=max(0,g["eff_quota"]-g["done"])
+            hc=GRN if left==0 else (ORG if g["done"]/max(g["eff_quota"],1)>=0.6 else RED)
+            hl.append({"c":hc,"t":g["label"],
+                       "s":f"{g['done']}/{g['eff_quota']} — {'All complete ✓' if left==0 else f'{left} cases left'}"})
         if invs:
             tp=round(invs[0]["total"]/total*100) if total else 0
             hl.append({"c":ORG,"t":"Top investigator","s":f"{invs[0]['name']} · {invs[0]['total']} cases ({tp}%)"})
@@ -880,7 +903,7 @@ else:
                                         paper_bgcolor="rgba(0,0,0,0)",plot_bgcolor="rgba(0,0,0,0)",
                                         template=PLT,xaxis=dict(showgrid=False),yaxis=dict(showgrid=True))
                     st.plotly_chart(fig_d,use_container_width=True,config={"displayModeBar":False},
-                                    key=f"fig_d_{inv['name']}")
+                                    key=f"fig_d_{idx}_{st.session_state.tab}")
                 with ex2:
                     st.markdown(f'<div style="font-size:10px;font-weight:700;color:{ORG};'
                                 f'text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px">By country</div>',
@@ -894,7 +917,7 @@ else:
                                                 paper_bgcolor="rgba(0,0,0,0)",plot_bgcolor="rgba(0,0,0,0)",
                                                 template=PLT,xaxis=dict(showgrid=True),yaxis=dict(showgrid=False))
                             st.plotly_chart(fig_c,use_container_width=True,config={"displayModeBar":False},
-                                            key=f"fig_c_{inv['name']}")
+                                            key=f"fig_c_{idx}_{st.session_state.tab}")
                 if not m_data.empty:
                     im=m_data[m_data["investigator"]==inv["name"]]
                     if not im.empty:
@@ -909,7 +932,7 @@ else:
                                             paper_bgcolor="rgba(0,0,0,0)",plot_bgcolor="rgba(0,0,0,0)",
                                             template=PLT,xaxis=dict(showgrid=False,tickangle=-45),yaxis=dict(showgrid=True))
                         st.plotly_chart(fig_m,use_container_width=True,config={"displayModeBar":False},
-                                        key=f"fig_m_{inv['name']}")
+                                        key=f"fig_m_{idx}_{st.session_state.tab}")
 
 st.markdown("<br>",unsafe_allow_html=True)
 

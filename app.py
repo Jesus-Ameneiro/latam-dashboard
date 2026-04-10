@@ -39,9 +39,12 @@ MONTH_MAP = {m: i+1 for i, m in enumerate([
     "july","august","september","october","november","december",
 ])}
 DISQ_RE = re.compile(
-    r"\b(disqualif|reject|rjected|duplicad[ao]?|repeated|duplicate\s+of|"
-    r"related|case\s+related|already\s+contacted|entity\s+already|"
-    r"caso\s+relacionado|caso\s+duplicado)\b", re.IGNORECASE,
+    r"\b(disqualif|disqualified|reject|rjected|duplicad[ao]?|repeated|"
+    r"duplicate\s+of|duplicado|related|case\s+related|already\s+contacted|"
+    r"entity\s+already|caso\s+relacionado|caso\s+duplicado|not\s+valid|"
+    r"no\s+aplica|kasznar|kaznar|attended\s+by\s+kaz|"
+    r"same\s+entity|rjected|repeated\s+case|already\s+processed)\b",
+    re.IGNORECASE,
 )
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -186,14 +189,18 @@ def parse_date_val(val):
     return None
 
 def get_weeks(year, month):
+    """Generate Mon–Sun weeks that overlap with the given month."""
     weeks, first = [], date(year, month, 1)
     last = date(year,12,31) if month==12 else date(year,month+1,1)-timedelta(1)
-    cur  = first - timedelta(first.weekday())
+    cur  = first - timedelta(first.weekday())   # back to Monday
     while cur <= last:
-        end = cur + timedelta(4)
-        if end>=first and cur<=last:
-            weeks.append({"start":cur.strftime("%Y-%m-%d"),"end":end.strftime("%Y-%m-%d"),
-                          "label":f"{cur.strftime('%b')} {cur.day} – {end.strftime('%b')} {end.day}"})
+        end = cur + timedelta(6)                # Sunday
+        if end >= first and cur <= last:
+            weeks.append({
+                "start": cur.strftime("%Y-%m-%d"),
+                "end":   end.strftime("%Y-%m-%d"),
+                "label": f"{cur.strftime('%b')} {cur.day} – {end.strftime('%b')} {end.day}",
+            })
         cur += timedelta(7)
     return weeks
 
@@ -238,7 +245,8 @@ def parse_wide(df_raw, source_file=""):
     headers = [str(h).strip() if h is not None and str(h)!="nan" else "" for h in rows[0]]
     date_positions = [i for i,h in enumerate(headers) if h=="Date"]
     records, seen = [], set()
-    skip_disq = skip_blank = 0
+    skip_disq = skip_blank = total_raw = 0
+
     for dp in date_positions:
         for row in rows[1:]:
             try:
@@ -247,16 +255,33 @@ def parse_wide(df_raw, source_file=""):
                 ctr = norm_country(row[dp+3]   if dp+3<len(row) else "")
                 inv = str(row[dp+4] if dp+4<len(row) else "").strip()
                 qa  = str(row[dp+5] if dp+5<len(row) else "")
-                if not ds or not cid or not ctr or not inv or inv in ("nan","None",""): skip_blank+=1; continue
-                if is_disq(qa): skip_disq+=1; continue
+
+                # Count every non-empty row as a raw candidate
+                if cid and cid not in ("nan","None"): total_raw += 1
+
+                if not ds or not cid or not ctr or not inv or inv in ("nan","None",""):
+                    skip_blank += 1; continue
+                if is_disq(qa):
+                    skip_disq += 1; continue
+
                 key = f"{cid}|{inv}"
                 if key in seen: continue
                 seen.add(key)
                 records.append({"date":ds,"case_id":cid,"country":ctr,
                                  "investigator":inv,"source_file":source_file})
             except Exception: continue
+
+    # Store filter stats for UI display
+    st.session_state._filtered_counts[source_file] = {
+        "total_raw": total_raw,
+        "disq":      skip_disq,
+        "blank":     skip_blank,
+        "accepted":  len(records),
+    }
+
     if not records:
-        st.warning(f"⚠️ **{source_file}**: 0 valid cases. Filtered — disqualified:{skip_disq}, blank:{skip_blank}.")
+        st.warning(f"⚠️ **{source_file}**: 0 valid cases. "
+                   f"Filtered — disqualified/rejected: {skip_disq}, incomplete: {skip_blank}.")
         return EMPTY_DF.copy()
     return pd.DataFrame(records)
 
@@ -373,6 +398,7 @@ def fetch_from_github(show_spinner=True):
     st.session_state.files              = []
     st.session_state.week_quotas        = {}
     st.session_state.summary_file_weeks = {}
+    st.session_state._filtered_counts   = {}
 
     for sheet_name, csv_text in sheets.items():
         if "summary" in sheet_name.lower() or not csv_text.strip(): continue
@@ -644,13 +670,21 @@ with c4:
             ts_str = str(st.session_state.last_refresh)[:16]
         n_mcc = len(full_data[full_data["region"]=="MCC"]) if has_data else 0
         n_cs  = len(full_data[full_data["region"]=="CS"])  if has_data else 0
+        # Aggregate filter stats across all detail files
+        fc = st.session_state._filtered_counts
+        total_raw  = sum(v["total_raw"] for v in fc.values())
+        total_disq = sum(v["disq"]      for v in fc.values())
         st.markdown(
-            f'<div style="font-size:11px;color:{TX2};padding-top:6px;line-height:1.7">'
-            f'<span style="color:{GRN}">● Connected to GitHub</span> &nbsp;·&nbsp; '
+            f'<div style="font-size:11px;color:{TX2};padding-top:4px;line-height:1.7">'
+            f'<span style="color:{GRN}">● Connected</span> &nbsp;·&nbsp; '
             f'Last push: <b>{ts_str}</b><br>'
-            f'{len(raw_data)} cases &nbsp;·&nbsp; '
+            f'Accepted: <b style="color:{ORG}">{len(raw_data)}</b> &nbsp;·&nbsp; '
             f'MCC: <b style="color:{ORG}">{n_mcc}</b> &nbsp;·&nbsp; '
-            f'CS: <b style="color:{ORG}">{n_cs}</b></div>', unsafe_allow_html=True)
+            f'CS: <b style="color:{ORG}">{n_cs}</b>'
+            + (f' &nbsp;·&nbsp; <span style="color:{RED}">Excluded (QA): {total_disq}</span>'
+               if total_disq else "")
+            + f'</div>',
+            unsafe_allow_html=True)
     elif GITHUB_TOKEN and GITHUB_REPO:
         st.markdown(f'<div style="font-size:11px;color:{TX2};padding-top:8px">'
                     f'<span style="color:{ORG}">○ Not loaded</span> — press Refresh</div>',

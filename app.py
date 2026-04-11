@@ -718,43 +718,57 @@ m_pfx  = f"{sel_month['year']:04d}-{sel_month['month']:02d}"
 m_data = (r_data[r_data["date"].str.startswith(m_pfx)]
           if not r_data.empty else pd.DataFrame())
 
-total = len(w_data); gap=max(0,tq-total); pct=min(100,round(total/tq*100)) if tq else 0
+# ── Check if summary has authoritative counts for this week ──────────────────
+wk_summary = st.session_state.week_quotas.get(sel_week["start"], {}).get(st.session_state.tab, {})
+has_summary_counts = bool(wk_summary.get("investigators") or wk_summary.get("countries"))
 
-# Compute effective quota per group (summary-derived if available, else config)
-sg = (st.session_state.week_quotas
-      .get(sel_week["start"], {})
-      .get(st.session_state.tab, {})
-      .get("groups", {}))
+if has_summary_counts:
+    # Use summary week-table counts as the authoritative source
+    total = wk_summary.get("total", 0)
+    inv_counts   = wk_summary.get("investigators", {})
+    ctr_counts   = wk_summary.get("countries", {})
 
-groups = []
-for g in cfg["groups"]:
-    sq  = next((v for sn, v in sg.items()
-                if any(c.lower() in sn.lower() or sn.lower() in c.lower()
-                       for c in g["countries"])), None)
-    dq  = sq if sq else g["quota"]
-    done = len(w_data[w_data["country"].isin(g["countries"])]) if not w_data.empty else 0
-    groups.append({**g, "done": done, "eff_quota": dq})
-invs = []
-if not w_data.empty:
-    for inv_name,grp in sorted(w_data.groupby("investigator"),key=lambda x:-len(x[1])):
-        invs.append({"name":inv_name,"total":len(grp),
-                     "month_total":len(m_data[m_data["investigator"]==inv_name]) if not m_data.empty else 0,
-                     "by_day":grp.groupby("date").size().to_dict(),
-                     "support":inv_name in cfg.get("support",[])})
-w_days=[]
-d_cur=datetime.strptime(sel_week["start"],"%Y-%m-%d")
-d_end=datetime.strptime(sel_week["end"],  "%Y-%m-%d")
-while d_cur<=d_end:
-    ds=d_cur.strftime("%Y-%m-%d")
-    w_days.append({"ds":ds,"label":fmt_day(ds),"day":str(d_cur.day),
-                   "total":len(w_data[w_data["date"]==ds]) if not w_data.empty else 0})
-    d_cur+=timedelta(1)
-by_country=(w_data.groupby("country").size().sort_values(ascending=False).to_dict()
-            if not w_data.empty else {})
-by_inv_stat=[{"name":i["name"],"total":i["total"],
-              "pct":round(i["total"]/total*100) if total else 0,"support":i["support"]}
-             for i in invs]
-quota_from_summary=bool(st.session_state.week_quotas.get(sel_week["start"]))
+    # Rebuild invs from summary investigator table
+    invs = []
+    for inv_name, inv_total in sorted(inv_counts.items(), key=lambda x: -x[1]):
+        # Month total still comes from detail data (date-filtered to month)
+        month_total = len(m_data[m_data["investigator"] == inv_name]) if not m_data.empty else 0
+        # Day-level breakdown still from detail data (best effort)
+        inv_detail = w_data[w_data["investigator"] == inv_name] if not w_data.empty else pd.DataFrame()
+        by_day = inv_detail.groupby("date").size().to_dict() if not inv_detail.empty else {}
+        invs.append({
+            "name":        inv_name,
+            "total":       inv_total,
+            "month_total": month_total,
+            "by_day":      by_day,
+            "support":     inv_name in cfg.get("support", []),
+        })
+
+    # Country counts from summary
+    by_country = dict(sorted(ctr_counts.items(), key=lambda x: -x[1]))
+
+    # Investigator stat list
+    by_inv_stat = [{"name": i["name"], "total": i["total"],
+                    "pct": round(i["total"] / total * 100) if total else 0,
+                    "support": i["support"]} for i in invs]
+else:
+    # Fallback: derive everything from date-filtered detail data
+    total = len(w_data)
+    invs  = []
+    if not w_data.empty:
+        for inv_name, grp in sorted(w_data.groupby("investigator"), key=lambda x: -len(x[1])):
+            invs.append({
+                "name":        inv_name,
+                "total":       len(grp),
+                "month_total": len(m_data[m_data["investigator"] == inv_name]) if not m_data.empty else 0,
+                "by_day":      grp.groupby("date").size().to_dict(),
+                "support":     inv_name in cfg.get("support", []),
+            })
+    by_country  = (w_data.groupby("country").size().sort_values(ascending=False).to_dict()
+                   if not w_data.empty else {})
+    by_inv_stat = [{"name": i["name"], "total": i["total"],
+                    "pct": round(i["total"] / total * 100) if total else 0,
+                    "support": i["support"]} for i in invs]
 
 # ──────────────────────────────────────────────────────────────────────────────
 # METRIC ROW

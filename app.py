@@ -770,6 +770,8 @@ else:
                     "pct": round(i["total"] / total * 100) if total else 0,
                     "support": i["support"]} for i in invs]
 
+quota_from_summary = bool(wk_summary.get("total") or wk_summary.get("groups"))
+
 # ──────────────────────────────────────────────────────────────────────────────
 # METRIC ROW
 # ──────────────────────────────────────────────────────────────────────────────

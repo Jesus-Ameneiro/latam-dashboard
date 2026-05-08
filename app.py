@@ -97,6 +97,7 @@ for k, v in [
     ("_pending_fetch",     False),
     ("_wk_month_key",      None),
     ("_prev_dark",         None),
+    ("_filtered_counts",   {}),
 ]:
     if k not in st.session_state:
         st.session_state[k] = v
@@ -155,10 +156,6 @@ def with_region(df):
 # ──────────────────────────────────────────────────────────────────────────────
 # TEXT / DATE HELPERS
 # ──────────────────────────────────────────────────────────────────────────────
-def safe(s):
-    n = unicodedata.normalize('NFKD', str(s or ""))
-    return n.encode('latin-1', 'ignore').decode('latin-1')
-
 def norm_country(c):
     if not c or str(c).strip() in ("","nan","None"): return ""
     t = str(c).strip()
@@ -250,6 +247,8 @@ def clean_case_id(raw):
     # Split on comma or semicolon, take first token
     first = re.split(r"[,;]", s)[0].strip()
     return first if first and first not in ("nan","None","") else ""
+
+def parse_wide(df_raw, source_file):
     rows = df_raw.values.tolist()
     if len(rows) < 2: return EMPTY_DF.copy()
     headers = [str(h).strip() if h is not None and str(h)!="nan" else "" for h in rows[0]]
@@ -261,8 +260,8 @@ def clean_case_id(raw):
         for row in rows[1:]:
             try:
                 ds  = parse_date_val(row[dp]   if dp   < len(row) else None)
-                cid = str(row[dp+1] if dp+1<len(row) else "").strip().strip("\"'")
-                ctr = norm_country(row[dp+3]   if dp+3<len(row) else "")
+                cid = clean_case_id(row[dp+1]  if dp+1 < len(row) else "")
+                ctr = norm_country(row[dp+3]   if dp+3 < len(row) else "")
                 inv = str(row[dp+4] if dp+4<len(row) else "").strip()
                 qa  = str(row[dp+5] if dp+5<len(row) else "")
 
@@ -270,14 +269,11 @@ def clean_case_id(raw):
                 if cid and cid not in ("nan","None"): total_raw += 1
 
                 # ── Rule 1: QA Notes contains rejected or disqualified ──────
-                # If QA note flags the case → exclude, do not count
                 if is_disq(qa):
                     skip_disq += 1
                     continue
 
                 # ── Rule 2: Both country AND investigator must have a value ──
-                # A case with no country cannot be assigned to a region batch.
-                # A case with no investigator has no owner — not generated.
                 if not ctr or ctr in ("nan","None",""):
                     skip_no_country += 1
                     continue
@@ -763,17 +759,13 @@ wk_summary = st.session_state.week_quotas.get(sel_week["start"], {}).get(st.sess
 has_summary_counts = bool(wk_summary.get("investigators") or wk_summary.get("countries"))
 
 if has_summary_counts:
-    # Use summary week-table counts as the authoritative source
     total = wk_summary.get("total", 0)
     inv_counts   = wk_summary.get("investigators", {})
     ctr_counts   = wk_summary.get("countries", {})
 
-    # Rebuild invs from summary investigator table
     invs = []
     for inv_name, inv_total in sorted(inv_counts.items(), key=lambda x: -x[1]):
-        # Month total still comes from detail data (date-filtered to month)
         month_total = len(m_data[m_data["investigator"] == inv_name]) if not m_data.empty else 0
-        # Day-level breakdown still from detail data (best effort)
         inv_detail = w_data[w_data["investigator"] == inv_name] if not w_data.empty else pd.DataFrame()
         by_day = inv_detail.groupby("date").size().to_dict() if not inv_detail.empty else {}
         invs.append({
@@ -784,15 +776,12 @@ if has_summary_counts:
             "support":     inv_name in cfg.get("support", []),
         })
 
-    # Country counts from summary
     by_country = dict(sorted(ctr_counts.items(), key=lambda x: -x[1]))
 
-    # Investigator stat list
     by_inv_stat = [{"name": i["name"], "total": i["total"],
                     "pct": round(i["total"] / total * 100) if total else 0,
                     "support": i["support"]} for i in invs]
 else:
-    # Fallback: derive everything from date-filtered detail data
     total = len(w_data)
     invs  = []
     if not w_data.empty:
@@ -811,6 +800,26 @@ else:
                     "support": i["support"]} for i in invs]
 
 quota_from_summary = bool(wk_summary.get("total") or wk_summary.get("groups"))
+
+# ── Derived metrics ───────────────────────────────────────────────────────────
+gap = max(0, tq - total)
+pct = round(total / tq * 100) if tq else 0
+
+# Week days (Mon–Sun) with per-day totals
+w_days = []
+_day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+for _i in range(7):
+    _ds = (datetime.strptime(sel_week["start"], "%Y-%m-%d") + timedelta(_i)).strftime("%Y-%m-%d")
+    _n  = len(w_data[w_data["date"] == _ds]) if not w_data.empty else 0
+    w_days.append({"ds": _ds, "day": _day_names[_i], "label": fmt_day(_ds), "total": _n})
+
+# Group breakdown with effective quotas and done counts
+_sg = st.session_state.week_quotas.get(sel_week["start"], {}).get(st.session_state.tab, {}).get("groups", {})
+groups = []
+for _g in cfg["groups"]:
+    _done = len(w_data[w_data["country"].isin(_g["countries"])]) if not w_data.empty else 0
+    _eq   = _sg.get(_g["label"], _g["quota"])
+    groups.append({"label": _g["label"], "quota": _g["quota"], "eff_quota": _eq, "done": _done})
 
 # ──────────────────────────────────────────────────────────────────────────────
 # METRIC ROW
@@ -859,7 +868,6 @@ with mc1:
 with mc2:
     with st.container(border=True):
         st.markdown('<div class="sec-lbl">Batch Quota · Group Breakdown</div>',unsafe_allow_html=True)
-        sg=st.session_state.week_quotas.get(sel_week["start"],{}).get(st.session_state.tab,{}).get("groups",{})
         for g in groups:
             dq   = g["eff_quota"]
             left = max(0, dq - g["done"])

@@ -868,8 +868,16 @@ month_weeks = [w for w in all_weeks if w["month_key"] == cur_month_key]
 cases_df = pd.DataFrame(st.session_state.all_cases) if st.session_state.all_cases else EMPTY_DF
 has_data = not cases_df.empty
 
-# Region pool: only cases assigned to this region by column position
+# STEP 1: filter by column-position region tag
 r_data = cases_df[cases_df["region"] == tab].copy() if has_data else pd.DataFrame()
+
+# STEP 2: strict country-membership validation.
+# An investigator may work in multiple regions; a case counts for a region ONLY
+# if its country belongs to that region's configured country list.
+# This is the authoritative guard against cross-region bleed.
+region_countries = set(c for g in cfg["groups"] for c in g["countries"])
+if not r_data.empty:
+    r_data = r_data[r_data["country"].isin(region_countries)]
 
 # Cases for the selected view
 if view_is_month:

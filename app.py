@@ -948,20 +948,25 @@ by_inv_stat = [dict(name=i["name"], total=i["total"],
                     support=i["support"])
                for i in invs]
 
-# ── w_days: Mon–Fri only ──────────────────────────────────────────────────────
-# The dashboard counts cases by work-week column position, not calendar date.
-# Daily bars always show exactly Mon–Fri of the relevant period.
+# ── w_days: built from ACTUAL case dates in w_data ───────────────────────────
+# IMPORTANT: weeks in the xlsx are defined by column position, NOT by calendar
+# date. Cases in a given week's column can have dates spanning multiple calendar
+# weeks (e.g. Week 1 MCC cases are dated Apr 20 – May 8, not just May 4–8).
+# Building w_days from the calendar week range (sel_week start/end) would make
+# all cases dated outside that narrow range invisible in the daily bars.
+# We must use the actual date range present in w_data for the selected scope.
 _DAY = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]
 
 def _build_w_days(start_str, end_str):
-    """Build Mon–Fri day objects between start and end (inclusive)."""
+    """Build Mon–Fri day objects between start and end (inclusive),
+    counting actual cases from w_data on each date."""
     days = []
     if not start_str or not end_str:
         return days
     cur = datetime.strptime(start_str, "%Y-%m-%d")
     end = datetime.strptime(end_str,   "%Y-%m-%d")
     while cur <= end:
-        if cur.weekday() < 5:  # 0=Mon … 4=Fri only; skip Sat(5) Sun(6)
+        if cur.weekday() < 5:          # Mon=0 … Fri=4; skip Sat/Sun
             ds = cur.strftime("%Y-%m-%d")
             n  = len(w_data[w_data["date"] == ds]) if not w_data.empty else 0
             days.append(dict(ds=ds, day=_DAY[cur.weekday()],
@@ -969,19 +974,28 @@ def _build_w_days(start_str, end_str):
         cur += timedelta(1)
     return days
 
-if view_is_month:
-    # Show all work-days in the month that appear in the data
-    if not w_data.empty:
-        mn_start = w_data["date"].min()
-        mn_end   = w_data["date"].max()
-        w_days   = _build_w_days(mn_start, mn_end)
-    elif month_weeks and month_weeks[0].get("start") and month_weeks[-1].get("end"):
-        w_days = _build_w_days(month_weeks[0]["start"], month_weeks[-1]["end"])
-    else:
-        w_days = _build_w_days(sel_week.get("start"), sel_week.get("end"))
+if not w_data.empty:
+    # Use the actual min/max dates of cases in the selected scope.
+    # This correctly captures cases that were entered before/after the
+    # calendar week boundary (common in the xlsx batch workflow).
+    actual_start = w_data["date"].min()
+    actual_end   = w_data["date"].max()
+    w_days = _build_w_days(actual_start, actual_end)
+elif view_is_month and month_weeks:
+    # No data yet for this month — fall back to month calendar span
+    starts = [w["start"] for w in month_weeks if w.get("start")]
+    ends   = [w["end"]   for w in month_weeks if w.get("end")]
+    w_days = _build_w_days(min(starts), max(ends)) if starts and ends else []
+elif sel_week.get("start") and sel_week.get("end"):
+    # No data at all — show empty calendar week as placeholder
+    w_days = _build_w_days(sel_week["start"], sel_week["end"])
 else:
-    # Exactly Mon–Fri of the selected week
-    w_days = _build_w_days(sel_week.get("start"), sel_week.get("end"))
+    w_days = []
+
+# Safety: if w_days is unreasonably long (> 45 work days), cap it to avoid
+# huge charts in full-month view with many months of data
+if len(w_days) > 45:
+    w_days = w_days[-45:]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # METRIC ROW
@@ -1099,7 +1113,13 @@ st.markdown("<br>", unsafe_allow_html=True)
 # ─────────────────────────────────────────────────────────────────────────────
 # INVESTIGATOR CARDS
 # ─────────────────────────────────────────────────────────────────────────────
-card_period = "Full Month" if view_is_month else sel_week["label"]
+# Show the actual date range of the data, not just the calendar week boundary.
+if view_is_month:
+    card_period = datetime.strptime(cur_month_key, "%Y-%m").strftime("%B %Y")
+elif w_days:
+    card_period = f"{sel_week['label'].split('·')[0].strip()} · {fmt_date_range(w_days[0]['ds'], w_days[-1]['ds'])}"
+else:
+    card_period = sel_week["label"]
 st.markdown(f"""
 <div style="font-size:10px;font-weight:700;color:{TX2};letter-spacing:.07em;
             text-transform:uppercase;margin-bottom:8px">

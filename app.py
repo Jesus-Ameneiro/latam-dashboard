@@ -53,7 +53,9 @@ DEFAULT_REGIONS = {
             {"label": "DR, Panama, Costa Rica",   "countries": ["Costa Rica","Dominican Republic","Panama"], "quota": 40},
             {"label": "Nicaragua, GT, SV, BZ, HN","countries": ["Nicaragua","Guatemala","El Salvador","Belize","Honduras"], "quota": 40},
         ],
-        "daily_min": 5, "daily_ideal": 7, "weekly_min": 26, "weekly_ideal": 35, "support": ["Luis"],
+        # daily_ideal=8 (goal), daily_min=5 (critical threshold ≤5)
+        # weekly_ideal=40 (goal), weekly_min=25 (critical threshold ≤25)
+        "daily_min": 5, "daily_ideal": 8, "weekly_min": 25, "weekly_ideal": 40, "support": ["Luis"],
     },
     "CS": {
         "name": "Cono Sur", "contact": "Ignacio Duce",
@@ -64,7 +66,7 @@ DEFAULT_REGIONS = {
             {"label": "Peru",               "countries": ["Peru"],              "quota": 10},
             {"label": "Uruguay, Bolivia, Paraguay","countries": ["Uruguay","Bolivia","Paraguay"],"quota": 20},
         ],
-        "daily_min": 5, "daily_ideal": 7, "weekly_min": 26, "weekly_ideal": 35, "support": [],
+        "daily_min": 5, "daily_ideal": 8, "weekly_min": 25, "weekly_ideal": 40, "support": [],
     },
 }
 
@@ -79,6 +81,7 @@ for k, v in [
     ("current_week_idx", 0),
     ("prev_week_idx",    0),
     ("view",             "current"),   # "prev" | "current" | "full_month"
+    ("full_month_key",   None),        # month_key shown in full_month view
     ("file_name",        None),
     ("tab",              "MCC"),
     ("dark",             True),
@@ -170,15 +173,18 @@ def fmt_date_range(s1, s2):
         return f"{s1}–{s2}"
 
 def dot_color(n, mn, ideal):
-    if not n:      return "#FEE2CC"
-    if n >= ideal: return GRN
-    if n >= mn:    return ORG
-    return RED
+    """mn=5 (critical threshold), ideal=8 (daily goal).
+    ≥ideal=green, (mn+1)–(ideal-1)=orange, ≤mn=red, 0=absent."""
+    if not n:      return "#FEE2CC"   # absent
+    if n >= ideal: return GRN          # ≥8 goal
+    if n > mn:     return ORG          # 6-7 acceptable
+    return RED                         # ≤5 critical
 
 def badge_for(total, wmin, wideal):
+    """wmin=25 (critical threshold), wideal=40 (weekly goal)."""
     if not total:       return "No data",    "#FEE2E2", RED
-    if total >= wideal: return "Recommended","#DCFCE7", GRN
-    if total >= wmin:   return "Minimum",    "#FEF9C3", "#CA8A04"
+    if total >= wideal: return "Goal",       "#DCFCE7", GRN
+    if total > wmin:    return "In Progress","#FEF9C3", "#CA8A04"
     return "Critical", "#FEE2E2", RED
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -352,13 +358,16 @@ def parse_data_sheet(wb, sheet_name, month_key):
             if dp >= len(row):
                 continue
             try:
-                # Offsets within each group: +0=Date, +1=CaseID, +2=CaseName,
-                # +3=Country, +4=Investigator, +5=QANotes, +6=QA'd
-                date_val    = row[dp]     if dp     < len(row) else None
-                case_id_raw = row[dp+1]   if dp+1   < len(row) else None
-                country_raw = row[dp+3]   if dp+3   < len(row) else None
-                inv_raw     = row[dp+4]   if dp+4   < len(row) else None
-                qa_notes    = row[dp+5]   if dp+5   < len(row) else None
+                # Offsets: +0=Date, +1=CaseID, +2=CaseName, +3=Country,
+                #          +4=Investigator, +5=QANotes, +6=QA'd
+                # ALL of Date, CaseID, CaseName, Country, Investigator must be
+                # present for a row to count as a generated case.
+                date_val      = row[dp]   if dp   < len(row) else None
+                case_id_raw   = row[dp+1] if dp+1 < len(row) else None
+                case_name_raw = row[dp+2] if dp+2 < len(row) else None
+                country_raw   = row[dp+3] if dp+3 < len(row) else None
+                inv_raw       = row[dp+4] if dp+4 < len(row) else None
+                qa_notes      = row[dp+5] if dp+5 < len(row) else None
 
                 ds = parse_date_val(date_val)
                 if not ds:
@@ -366,6 +375,11 @@ def parse_data_sheet(wb, sheet_name, month_key):
 
                 case_id = str(case_id_raw or "").strip().strip("\"'")
                 if not case_id or case_id in ("nan","None",""):
+                    continue
+
+                # Case Name must be present (required field)
+                case_name = str(case_name_raw or "").strip()
+                if not case_name or case_name in ("nan","None",""):
                     continue
 
                 country = norm_country(str(country_raw or ""))
@@ -484,6 +498,7 @@ def load_xlsx(file_obj):
     st.session_state.current_week_idx = cur_idx
     st.session_state.prev_week_idx    = prev_idx
     st.session_state.view             = "current"
+    st.session_state.full_month_key   = all_weeks[cur_idx]["month_key"] if all_weeks else None
 
     # Rebuild rcfg from current week's Summary so sidebar shows live data
     if all_weeks and cur_idx < len(all_weeks):
@@ -664,7 +679,7 @@ view      = st.session_state.view
 has_weeks = bool(all_weeks)
 has_prev  = has_weeks and (prev_idx != cur_idx)
 
-c_up, c_pv, c_cw, c_fm, c_st = st.columns([2.5, 1.7, 1.7, 1.5, 2.1])
+c_up, c_week, c_fm, c_msel, c_st = st.columns([2.3, 2.2, 1.3, 1.9, 2.1])
 
 with c_up:
     uploaded = st.file_uploader(
@@ -682,28 +697,98 @@ with c_up:
             f'📄 {st.session_state.file_name}</div>',
             unsafe_allow_html=True)
 
-def _view_btn(col, key, label, view_id, enabled=True):
-    with col:
-        if st.button(label, key=key,
-                     type="primary" if view == view_id else "secondary",
-                     use_container_width=True, disabled=not enabled):
-            st.session_state.view = view_id; st.rerun()
+# ── Week selector dropdown (Current / Previous) ──────────────────────────────
+with c_week:
+    if has_weeks:
+        def _wk_label(idx, prefix):
+            w = all_weeks[idx]
+            if w.get("start") and w.get("end"):
+                return f"{prefix} {fmt_date_range(w['start'], w['end'])}"
+            return f"{prefix} Week {w['week_num']}"
 
-# Previous week button label
-if has_prev and all_weeks[prev_idx].get("start"):
-    pv_lbl = f"← {fmt_date_range(all_weeks[prev_idx]['start'], all_weeks[prev_idx]['end'])}"
-else:
-    pv_lbl = "← Prev Week"
+        week_options = []
+        week_option_views = []
+        week_options.append(_wk_label(cur_idx, "★ Current:"))
+        week_option_views.append("current")
+        if has_prev:
+            week_options.append(_wk_label(prev_idx, "← Previous:"))
+            week_option_views.append("prev")
 
-# Current week button label
-if has_weeks and all_weeks[cur_idx].get("start"):
-    cw_lbl = f"★ {fmt_date_range(all_weeks[cur_idx]['start'], all_weeks[cur_idx]['end'])}"
-else:
-    cw_lbl = "★ Current Week"
+        # Determine current selection index in dropdown
+        if view in ("current","prev") and view in week_option_views:
+            wk_sel_default = week_option_views.index(view)
+        else:
+            wk_sel_default = 0
 
-_view_btn(c_pv, "btn_prev",  pv_lbl,       "prev",       has_prev)
-_view_btn(c_cw, "btn_cur",   cw_lbl,        "current",    has_weeks)
-_view_btn(c_fm, "btn_month", "📅 Full Month","full_month", has_weeks)
+        wk_choice = st.selectbox(
+            "Week", week_options, index=wk_sel_default,
+            label_visibility="collapsed",
+            key="wk_dropdown",
+            disabled=(view == "full_month"),
+        )
+        if view != "full_month":
+            chosen_view = week_option_views[week_options.index(wk_choice)]
+            if chosen_view != view:
+                st.session_state.view = chosen_view; st.rerun()
+    else:
+        st.markdown(
+            f'<div style="font-size:11px;color:{TX2};padding-top:8px">'
+            f'Upload a file to see weeks</div>', unsafe_allow_html=True)
+
+# ── Full Month toggle ─────────────────────────────────────────────────────────
+with c_fm:
+    if st.button(
+        "📅 Full Month",
+        key="btn_month",
+        type="primary" if view == "full_month" else "secondary",
+        use_container_width=True,
+        disabled=not has_weeks,
+    ):
+        if view == "full_month":
+            # Toggle off → back to current week
+            st.session_state.view = "current"
+        else:
+            st.session_state.view = "full_month"
+            # Default full_month_key to current month
+            if not st.session_state.full_month_key and has_weeks:
+                st.session_state.full_month_key = all_weeks[cur_idx]["month_key"]
+        st.rerun()
+
+# ── Month selector (visible only in full_month mode) ─────────────────────────
+with c_msel:
+    if view == "full_month" and has_weeks:
+        # Build available months: current + previous (based on today)
+        today = date.today()
+        cur_mk  = f"{today.year}-{today.month:02d}"
+        # Previous calendar month
+        prev_mo_date = date(today.year, today.month, 1) - timedelta(1)
+        prev_mk = f"{prev_mo_date.year}-{prev_mo_date.month:02d}"
+
+        # Only offer months that actually have data in the workbook
+        avail_month_keys = sorted(set(w["month_key"] for w in all_weeks))
+        month_opts = [mk for mk in [cur_mk, prev_mk] if mk in avail_month_keys]
+        if not month_opts:
+            month_opts = avail_month_keys[-2:] if len(avail_month_keys) >= 2 else avail_month_keys
+
+        month_labels = {mk: datetime.strptime(mk, "%Y-%m").strftime("%B %Y")
+                        for mk in month_opts}
+
+        # Ensure full_month_key is valid
+        if st.session_state.full_month_key not in month_opts:
+            st.session_state.full_month_key = month_opts[-1]
+
+        mo_default = month_opts.index(st.session_state.full_month_key)
+        mo_choice  = st.selectbox(
+            "Month", options=month_opts,
+            format_func=lambda mk: month_labels[mk],
+            index=mo_default,
+            label_visibility="collapsed",
+            key="month_dropdown",
+        )
+        if mo_choice != st.session_state.full_month_key:
+            st.session_state.full_month_key = mo_choice; st.rerun()
+    else:
+        st.markdown("", unsafe_allow_html=True)  # empty placeholder
 
 with c_st:
     if not has_weeks:
@@ -741,41 +826,47 @@ cfg           = st.session_state.rcfg[tab]
 view          = st.session_state.view
 view_is_month = (view == "full_month")
 
-# Which week is selected as anchor
+# Which week is selected as anchor (week views only)
 sel_idx  = prev_idx if view == "prev" else cur_idx
 sel_week = all_weeks[sel_idx]
 
-# Month context anchored on current week (not prev, not changed by view)
-cur_month_key = all_weeks[cur_idx]["month_key"]
-month_weeks   = [w for w in all_weeks if w["month_key"] == cur_month_key]
+# Month context:
+# - week views: month of the selected week
+# - full_month: the user-chosen month (full_month_key), defaulting to cur month
+if view_is_month:
+    cur_month_key = st.session_state.full_month_key or all_weeks[cur_idx]["month_key"]
+else:
+    cur_month_key = sel_week["month_key"]
+
+month_weeks = [w for w in all_weeks if w["month_key"] == cur_month_key]
 
 # ── Build DataFrame ──────────────────────────────────────────────────────────
 cases_df = pd.DataFrame(st.session_state.all_cases) if st.session_state.all_cases else EMPTY_DF
 has_data = not cases_df.empty
 
-# Region-filtered pool (use the region column from column-position assignment)
+# Region pool: only cases assigned to this region by column position
 r_data = cases_df[cases_df["region"] == tab].copy() if has_data else pd.DataFrame()
 
 # Cases for the selected view
 if view_is_month:
-    # All cases this month for this region
-    w_data = r_data[r_data["month_key"] == cur_month_key] if not r_data.empty else pd.DataFrame()
+    w_data = (r_data[r_data["month_key"] == cur_month_key]
+              if not r_data.empty else pd.DataFrame())
 else:
-    # Exact week (week_num + month_key – NOT date)
+    # Exact week by (week_num + month_key) — NOT by date value
     w_data = r_data[
         (r_data["month_key"] == sel_week["month_key"]) &
         (r_data["week_num"]  == sel_week["week_num"])
     ] if not r_data.empty else pd.DataFrame()
 
-# Month data (for "month total" on cards)
-m_data = r_data[r_data["month_key"] == cur_month_key] if not r_data.empty else pd.DataFrame()
+# Month data (for "month total" on investigator cards, always full month)
+m_data = (r_data[r_data["month_key"] == cur_month_key]
+          if not r_data.empty else pd.DataFrame())
 
-# ── Summary quota data (authoritative from xlsx) ──────────────────────────────
+# ── Summary quota data (authoritative from xlsx Summary sheet) ────────────────
 rkey = "mcc" if tab == "MCC" else "cs"
 
 if view_is_month:
     tq = sum(w[rkey]["total"] for w in month_weeks)
-    # Merge groups by label across all weeks of the month
     grp_map = {}
     for w in month_weeks:
         for g in w[rkey]["groups"]:
@@ -792,12 +883,11 @@ else:
     summary_groups = sel_week[rkey]["groups"]
     view_label     = sel_week["label"]
 
-# Summary totals drive the headline numbers
+# Summary totals are authoritative
 total = sum(g["generated"] for g in summary_groups)
 gap   = max(0, tq - total)
 pct   = round(total / tq * 100) if tq else 0
 
-# Group rows for breakdown panel (Summary is authoritative)
 groups = [
     dict(label=g["label"], quota=g["quota"],
          eff_quota=g["quota"], done=g["generated"])
@@ -826,28 +916,39 @@ by_inv_stat = [dict(name=i["name"], total=i["total"],
                     support=i["support"])
                for i in invs]
 
-# ── w_days: work-day list for daily bars / chart ──────────────────────────────
+# ── w_days: Mon–Fri only ──────────────────────────────────────────────────────
+# The dashboard counts cases by work-week column position, not calendar date.
+# Daily bars always show exactly Mon–Fri of the relevant period.
 _DAY = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]
 
 def _build_w_days(start_str, end_str):
+    """Build Mon–Fri day objects between start and end (inclusive)."""
     days = []
-    if not start_str or not end_str: return days
+    if not start_str or not end_str:
+        return days
     cur = datetime.strptime(start_str, "%Y-%m-%d")
     end = datetime.strptime(end_str,   "%Y-%m-%d")
     while cur <= end:
-        ds = cur.strftime("%Y-%m-%d")
-        n  = len(w_data[w_data["date"] == ds]) if not w_data.empty else 0
-        days.append(dict(ds=ds, day=_DAY[cur.weekday()], label=fmt_day(ds), total=n))
+        if cur.weekday() < 5:  # 0=Mon … 4=Fri only; skip Sat(5) Sun(6)
+            ds = cur.strftime("%Y-%m-%d")
+            n  = len(w_data[w_data["date"] == ds]) if not w_data.empty else 0
+            days.append(dict(ds=ds, day=_DAY[cur.weekday()],
+                             label=fmt_day(ds), total=n))
         cur += timedelta(1)
     return days
 
 if view_is_month:
-    # All unique dates in the month that had activity
+    # Show all work-days in the month that appear in the data
     if not w_data.empty:
-        w_days = _build_w_days(w_data["date"].min(), w_data["date"].max())
+        mn_start = w_data["date"].min()
+        mn_end   = w_data["date"].max()
+        w_days   = _build_w_days(mn_start, mn_end)
+    elif month_weeks and month_weeks[0].get("start") and month_weeks[-1].get("end"):
+        w_days = _build_w_days(month_weeks[0]["start"], month_weeks[-1]["end"])
     else:
         w_days = _build_w_days(sel_week.get("start"), sel_week.get("end"))
 else:
+    # Exactly Mon–Fri of the selected week
     w_days = _build_w_days(sel_week.get("start"), sel_week.get("end"))
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -900,9 +1001,10 @@ with mc1:
                              plot_bgcolor="rgba(0,0,0,0)")
         st.plotly_chart(fig_g, use_container_width=True,
                         config={"displayModeBar": False})
+        q_lbl = "Monthly quota" if view_is_month else "Weekly quota"
         st.markdown(
             f'<p style="text-align:center;font-size:12px;font-weight:700;'
-            f'color:{ORG};margin-top:-20px">{gap} cases remaining</p>',
+            f'color:{ORG};margin-top:-20px">{gap} remaining · {q_lbl}</p>',
             unsafe_allow_html=True)
 
 with mc2:
@@ -969,9 +1071,13 @@ card_period = "Full Month" if view_is_month else sel_week["label"]
 st.markdown(f"""
 <div style="font-size:10px;font-weight:700;color:{TX2};letter-spacing:.07em;
             text-transform:uppercase;margin-bottom:8px">
-  👤 Investigator Performance — Critical ≤4/day · Min {cfg['daily_min']}–
-  {cfg['daily_ideal']-1}/day · Recommended ≥{cfg['daily_ideal']}/day ·
-  {card_period}
+  👤 Investigator Performance
+  &nbsp;·&nbsp; Daily: ≥{cfg['daily_ideal']} goal
+  <span style="color:{ORG}">· 6–{cfg['daily_ideal']-1} acceptable</span>
+  <span style="color:{RED}">· ≤{cfg['daily_min']} critical</span>
+  &nbsp;·&nbsp; Weekly: ≥{cfg['weekly_ideal']} goal
+  <span style="color:{RED}">· ≤{cfg['weekly_min']} critical</span>
+  &nbsp;·&nbsp; {card_period}
   <span style="font-size:10px;font-weight:400;background:{OL};padding:2px 8px;
                border-radius:20px;border:1px dashed {OB};margin-left:8px">
     click card to expand ↓</span>
@@ -1029,9 +1135,9 @@ def make_card(inv):
         f'<span style="width:9px;height:9px;background:{lc};border-radius:2px;'
         f'display:inline-block"></span>{ll}</span>'
         for lc, ll in [
-            (GRN, f'≥{cfg["daily_ideal"]}'),
-            (ORG, f'{cfg["daily_min"]}–{cfg["daily_ideal"]-1}'),
-            (RED, f'1–{cfg["daily_min"]-1}'),
+            (GRN, f'≥{cfg["daily_ideal"]}/day goal'),
+            (ORG, f'6–{cfg["daily_ideal"]-1}/day'),
+            (RED, f'≤{cfg["daily_min"]}/day critical'),
             ("#FEE2CC", "absent"),
         ])
     return f"""
@@ -1158,10 +1264,10 @@ with st.container(border=True):
             x=x_vals, y=[0]*len(x_vals), mode="lines",
             line=dict(color=BORD, width=2)))
     fig_l.add_hline(y=cfg["daily_ideal"], line_dash="dash", line_color=GRN,
-                    annotation_text="Ideal", annotation_position="right",
+                    annotation_text=f"Goal ({cfg['daily_ideal']})", annotation_position="right",
                     annotation_font_color=GRN)
     fig_l.add_hline(y=cfg["daily_min"],   line_dash="dash", line_color=RED,
-                    annotation_text="Min",  annotation_position="right",
+                    annotation_text=f"Critical ({cfg['daily_min']})", annotation_position="right",
                     annotation_font_color=RED)
     fig_l.update_layout(
         height=220, margin=dict(t=10,b=10,l=10,r=60),

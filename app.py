@@ -213,6 +213,22 @@ def _dates_from_range(dr_str, year):
             except Exception: pass
     return None, None
 
+def _calc_week_dates(year, month, week_num):
+    """Calculate Mon–Fri of the Nth work week of a calendar month.
+    Week 1 = the week whose Monday is the first Monday on or after the 1st.
+    Verified: May 2026 W1=May 4-8, W2=May 11-15, W3=May 18-22, W4=May 25-29.
+    """
+    try:
+        first       = date(year, month, 1)
+        wd          = first.weekday()                  # 0=Mon … 6=Sun
+        days_to_mon = (7 - wd) % 7                    # 0 when already Monday
+        first_mon   = first + timedelta(days_to_mon)
+        week_start  = first_mon + timedelta(weeks=(week_num - 1))
+        week_end    = week_start + timedelta(4)        # Friday
+        return week_start.strftime('%Y-%m-%d'), week_end.strftime('%Y-%m-%d')
+    except Exception:
+        return None, None
+
 
 def parse_summary_sheet(wb, sheet_name, month_key, year):
     """
@@ -464,20 +480,25 @@ def load_xlsx(file_obj):
     # Sort weeks chronologically
     all_weeks.sort(key=lambda w: (w["month_key"], w["week_num"]))
 
-    # Fill missing date ranges (March/April have no dates in header)
-    # Use min/max of actual case dates for that week group
+    # Fill missing date ranges using CALENDAR MATH (not case dates).
+    # Months without explicit ranges in the Summary header (March, April) used
+    # to get start/end from min/max of case dates, which can span months and
+    # cause today's date to incorrectly match a past week.
+    # _calc_week_dates() gives the exact Mon-Fri for week N of a month,
+    # verified against all May Summary headers.
     for w in all_weeks:
         if not w["start"] or not w["end"]:
-            wk_dates = [c["date"] for c in all_cases
-                        if c["month_key"] == w["month_key"]
-                        and c["week_num"]  == w["week_num"]]
-            if wk_dates:
-                w["start"] = min(wk_dates)
-                w["end"]   = max(wk_dates)
-                w["label"] = (f"Week {w['week_num']} · "
-                              f"{fmt_date_range(w['start'], w['end'])}")
+            y  = int(w["month_key"][:4])
+            mo = int(w["month_key"][5:])
+            s, e = _calc_week_dates(y, mo, w["week_num"])
+            if s and e:
+                w["start"] = s
+                w["end"]   = e
+                w["label"] = f"Week {w['week_num']} · {fmt_date_range(s, e)}"
 
-    # Determine current week (work week containing today)
+    # Determine current week: find the week whose Mon-Fri span contains today.
+    # Because all weeks now have calendar-correct start/end, each non-overlapping
+    # Mon-Fri range will match at most one week.
     today_str = date.today().strftime("%Y-%m-%d")
     cur_idx   = None
     for i, w in enumerate(all_weeks):
@@ -485,7 +506,10 @@ def load_xlsx(file_obj):
             if w["start"] <= today_str <= w["end"]:
                 cur_idx = i
                 break
+
     if cur_idx is None:
+        # Today is not inside any week (e.g. file only covers past months).
+        # Use the most recent past week.
         past = [i for i, w in enumerate(all_weeks)
                 if w.get("end") and w["end"] < today_str]
         cur_idx = past[-1] if past else max(0, len(all_weeks) - 1)

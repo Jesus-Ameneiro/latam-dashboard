@@ -850,13 +850,12 @@ cfg           = st.session_state.rcfg[tab]
 view          = st.session_state.view
 view_is_month = (view == "full_month")
 
-# Which week is selected as anchor (week views only)
+# ── Determine selected week and month context ─────────────────────────────────
+# Week views: anchor on the selected week's calendar period
+# Full month: use the user-chosen month key
 sel_idx  = prev_idx if view == "prev" else cur_idx
 sel_week = all_weeks[sel_idx]
 
-# Month context:
-# - week views: month of the selected week
-# - full_month: the user-chosen month (full_month_key), defaulting to cur month
 if view_is_month:
     cur_month_key = st.session_state.full_month_key or all_weeks[cur_idx]["month_key"]
 else:
@@ -864,35 +863,63 @@ else:
 
 month_weeks = [w for w in all_weeks if w["month_key"] == cur_month_key]
 
-# ── Build DataFrame ──────────────────────────────────────────────────────────
+# ── Calendar boundaries ───────────────────────────────────────────────────────
+# These are always derived from the calendar, never from the xlsx Summary header.
+# Summary headers may contain batch date ranges (e.g. "Apr 29-May 15") that
+# span multiple calendar weeks and would produce wrong filter windows.
+import calendar as _cal
+_y, _m = int(cur_month_key[:4]), int(cur_month_key[5:])
+month_start_str = f"{_y}-{_m:02d}-01"
+month_end_str   = f"{_y}-{_m:02d}-{_cal.monthrange(_y, _m)[1]:02d}"
+
+# Week boundary: ALWAYS computed from calendar math for the exact Mon–Fri 5-day
+# window. sel_week["week_num"] and sel_week["month_key"] are the only trusted
+# fields; sel_week["start"]/["end"] may reflect batch periods from the Summary
+# header which can span multiple weeks and must NOT be used here.
+_wk_year  = int(sel_week["month_key"][:4])
+_wk_month = int(sel_week["month_key"][5:])
+week_start_str, week_end_str = _calc_week_dates(_wk_year, _wk_month, sel_week["week_num"])
+# Safety fallback (should never occur given _calc_week_dates is always valid)
+if not week_start_str or not week_end_str:
+    week_start_str = sel_week.get("start") or ""
+    week_end_str   = sel_week.get("end")   or ""
+
+# ── Build region-filtered base pool ──────────────────────────────────────────
 cases_df = pd.DataFrame(st.session_state.all_cases) if st.session_state.all_cases else EMPTY_DF
 has_data = not cases_df.empty
 
-# STEP 1: filter by column-position region tag
+# STEP 1: column-position region tag
 r_data = cases_df[cases_df["region"] == tab].copy() if has_data else pd.DataFrame()
 
-# STEP 2: strict country-membership validation.
-# An investigator may work in multiple regions; a case counts for a region ONLY
-# if its country belongs to that region's configured country list.
-# This is the authoritative guard against cross-region bleed.
+# STEP 2: country-membership validation (prevents cross-region bleed when an
+# investigator works both regions, or Excel data-entry errors place a CS country
+# in an MCC column).
 region_countries = set(c for g in cfg["groups"] for c in g["countries"])
 if not r_data.empty:
     r_data = r_data[r_data["country"].isin(region_countries)]
 
-# Cases for the selected view
+# ── w_data: STRICT calendar-date filter ──────────────────────────────────────
+# RULE: the view label (e.g. "May 4–8") defines the EXACT date window shown.
+# Cases worked before/after that window do NOT belong to this view, even if
+# they are in the same column group in the xlsx.
 if view_is_month:
-    w_data = (r_data[r_data["month_key"] == cur_month_key]
-              if not r_data.empty else pd.DataFrame())
-else:
-    # Exact week by (week_num + month_key) — NOT by date value
+    # Full month: all cases with dates inside the calendar month (May 1–31)
     w_data = r_data[
-        (r_data["month_key"] == sel_week["month_key"]) &
-        (r_data["week_num"]  == sel_week["week_num"])
+        (r_data["date"] >= month_start_str) &
+        (r_data["date"] <= month_end_str)
     ] if not r_data.empty else pd.DataFrame()
+else:
+    # Week view: ONLY cases dated within the calendar week (Mon–Fri)
+    w_data = r_data[
+        (r_data["date"] >= week_start_str) &
+        (r_data["date"] <= week_end_str)
+    ] if not r_data.empty and week_start_str and week_end_str else pd.DataFrame()
 
-# Month data (for "month total" on investigator cards, always full month)
-m_data = (r_data[r_data["month_key"] == cur_month_key]
-          if not r_data.empty else pd.DataFrame())
+# m_data: same month boundary, used for "month total" shown on week-view cards
+m_data = r_data[
+    (r_data["date"] >= month_start_str) &
+    (r_data["date"] <= month_end_str)
+] if not r_data.empty else pd.DataFrame()
 
 # ── Summary quota data (authoritative from xlsx Summary sheet) ────────────────
 rkey = "mcc" if tab == "MCC" else "cs"
@@ -915,7 +942,7 @@ else:
     summary_groups = sel_week[rkey]["groups"]
     view_label     = sel_week["label"]
 
-# Summary totals are authoritative
+# Summary totals are authoritative for batch quota progress
 total = sum(g["generated"] for g in summary_groups)
 gap   = max(0, tq - total)
 pct   = round(total / tq * 100) if tq else 0
@@ -927,15 +954,34 @@ groups = [
 ]
 
 # ── Investigator stats from data sheet ───────────────────────────────────────
+# For full month: compute per-week breakdown for each investigator.
+# For week view: compute per-day breakdown within the calendar week.
+
+# Build a mapping of week_num → (start, end) for the current month
+_wk_ranges = {
+    w["week_num"]: (w["start"], w["end"])
+    for w in month_weeks
+    if w.get("start") and w.get("end")
+}
+
 invs = []
 if not w_data.empty:
     for inv_name, grp in sorted(w_data.groupby("investigator"),
                                 key=lambda x: -len(x[1])):
         month_total = (len(m_data[m_data["investigator"] == inv_name])
                        if not m_data.empty else 0)
+        by_day = grp.groupby("date").size().to_dict()
+
+        # Weekly breakdown for full-month view:
+        # For each week of the month, count dates within that week's calendar range
+        by_week = {}
+        for wn, (ws, we) in sorted(_wk_ranges.items()):
+            wk_count = len(grp[(grp["date"] >= ws) & (grp["date"] <= we)])
+            by_week[wn] = wk_count
+
         invs.append(dict(
             name=inv_name, total=len(grp), month_total=month_total,
-            by_day=grp.groupby("date").size().to_dict(),
+            by_day=by_day, by_week=by_week,
             support=(inv_name in cfg.get("support", [])),
         ))
 
@@ -948,25 +994,18 @@ by_inv_stat = [dict(name=i["name"], total=i["total"],
                     support=i["support"])
                for i in invs]
 
-# ── w_days: built from ACTUAL case dates in w_data ───────────────────────────
-# IMPORTANT: weeks in the xlsx are defined by column position, NOT by calendar
-# date. Cases in a given week's column can have dates spanning multiple calendar
-# weeks (e.g. Week 1 MCC cases are dated Apr 20 – May 8, not just May 4–8).
-# Building w_days from the calendar week range (sel_week start/end) would make
-# all cases dated outside that narrow range invisible in the daily bars.
-# We must use the actual date range present in w_data for the selected scope.
+# ── w_days / w_weeks: display grid for production chart and daily bars ────────
 _DAY = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]
 
 def _build_w_days(start_str, end_str):
-    """Build Mon–Fri day objects between start and end (inclusive),
-    counting actual cases from w_data on each date."""
+    """Mon–Fri days between start and end (inclusive), with per-day case counts."""
     days = []
     if not start_str or not end_str:
         return days
     cur = datetime.strptime(start_str, "%Y-%m-%d")
     end = datetime.strptime(end_str,   "%Y-%m-%d")
     while cur <= end:
-        if cur.weekday() < 5:          # Mon=0 … Fri=4; skip Sat/Sun
+        if cur.weekday() < 5:
             ds = cur.strftime("%Y-%m-%d")
             n  = len(w_data[w_data["date"] == ds]) if not w_data.empty else 0
             days.append(dict(ds=ds, day=_DAY[cur.weekday()],
@@ -974,28 +1013,30 @@ def _build_w_days(start_str, end_str):
         cur += timedelta(1)
     return days
 
-if not w_data.empty:
-    # Use the actual min/max dates of cases in the selected scope.
-    # This correctly captures cases that were entered before/after the
-    # calendar week boundary (common in the xlsx batch workflow).
-    actual_start = w_data["date"].min()
-    actual_end   = w_data["date"].max()
-    w_days = _build_w_days(actual_start, actual_end)
-elif view_is_month and month_weeks:
-    # No data yet for this month — fall back to month calendar span
+if view_is_month:
+    # Full month: build w_days covering Mon–Fri of all weeks in the month
     starts = [w["start"] for w in month_weeks if w.get("start")]
     ends   = [w["end"]   for w in month_weeks if w.get("end")]
     w_days = _build_w_days(min(starts), max(ends)) if starts and ends else []
-elif sel_week.get("start") and sel_week.get("end"):
-    # No data at all — show empty calendar week as placeholder
-    w_days = _build_w_days(sel_week["start"], sel_week["end"])
-else:
-    w_days = []
 
-# Safety: if w_days is unreasonably long (> 45 work days), cap it to avoid
-# huge charts in full-month view with many months of data
-if len(w_days) > 45:
-    w_days = w_days[-45:]
+    # Also build weekly aggregates for the production chart and investigator bars
+    w_weeks = []
+    for w in sorted(month_weeks, key=lambda x: x["week_num"]):
+        if not w.get("start") or not w.get("end"):
+            continue
+        wk_total = len(w_data[
+            (w_data["date"] >= w["start"]) & (w_data["date"] <= w["end"])
+        ]) if not w_data.empty else 0
+        w_weeks.append(dict(
+            week_num=w["week_num"],
+            label=f"W{w['week_num']}",
+            detail=fmt_date_range(w["start"], w["end"]),
+            total=wk_total,
+        ))
+else:
+    # Week view: exactly Mon–Fri of the selected calendar week (always 5 days)
+    w_days  = _build_w_days(week_start_str, week_end_str)
+    w_weeks = []  # not used in week view
 
 # ─────────────────────────────────────────────────────────────────────────────
 # METRIC ROW
@@ -1113,11 +1154,10 @@ st.markdown("<br>", unsafe_allow_html=True)
 # ─────────────────────────────────────────────────────────────────────────────
 # INVESTIGATOR CARDS
 # ─────────────────────────────────────────────────────────────────────────────
-# Show the actual date range of the data, not just the calendar week boundary.
 if view_is_month:
     card_period = datetime.strptime(cur_month_key, "%Y-%m").strftime("%B %Y")
-elif w_days:
-    card_period = f"{sel_week['label'].split('·')[0].strip()} · {fmt_date_range(w_days[0]['ds'], w_days[-1]['ds'])}"
+elif week_start_str and week_end_str:
+    card_period = f"{sel_week['label'].split('·')[0].strip()} · {fmt_date_range(week_start_str, week_end_str)}"
 else:
     card_period = sel_week["label"]
 st.markdown(f"""
@@ -1145,21 +1185,72 @@ def make_card(inv):
     bl, bb, bc = (("Support","#F3F4F6","#6B7280") if inv["support"]
                   else badge_for(inv["total"], w_min, w_ideal))
     wk_pct = min(100, inv["total"] / w_ideal * 100) if w_ideal else 0
-    bars   = ""
-    for wd in w_days:
-        n  = inv["by_day"].get(wd["ds"], 0)
-        dc = dot_color(n, cfg["daily_min"], cfg["daily_ideal"])
-        tc = TX if n else "#D1D5DB"
-        bars += (
-            f'<div style="flex:1;text-align:center;min-width:16px">'
-            f'<div style="font-size:9px;font-weight:700;color:{tc};margin-bottom:2px">'
-            f'{"–" if not n else n}</div>'
-            f'<div style="height:22px;background:{dc};border-radius:3px"></div>'
-            f'<div style="font-size:8px;color:{TX2};margin-top:2px">{wd["day"]}</div>'
-            f'</div>')
 
-    plbl  = "Month total" if view_is_month else "Week total"
-    prog  = (
+    if view_is_month:
+        # ── Full Month: one bar per week ──────────────────────────────────────
+        bars = ""
+        for wk_info in w_weeks:
+            n   = inv["by_week"].get(wk_info["week_num"], 0)
+            dc  = dot_color(n, cfg["weekly_min"], cfg["weekly_ideal"]) if n else "#FEE2CC"
+            tc  = TX if n else "#D1D5DB"
+            bars += (
+                f'<div style="flex:1;text-align:center;min-width:40px">'
+                f'<div style="font-size:11px;font-weight:700;color:{tc};margin-bottom:3px">'
+                f'{"–" if not n else n}</div>'
+                f'<div style="height:28px;background:{dc};border-radius:4px"></div>'
+                f'<div style="font-size:9px;color:{TX2};margin-top:3px">'
+                f'{wk_info["label"]}<br>'
+                f'<span style="font-size:8px">{wk_info["detail"]}</span></div>'
+                f'</div>')
+        week_legend = "".join(
+            f'<span style="display:flex;align-items:center;gap:3px;font-size:10px;color:{TX2}">'
+            f'<span style="width:9px;height:9px;background:{lc};border-radius:2px;'
+            f'display:inline-block"></span>{ll}</span>'
+            for lc, ll in [
+                (GRN, f'≥{cfg["weekly_ideal"]}/wk goal'),
+                (ORG, f'{cfg["weekly_min"]+1}–{cfg["weekly_ideal"]-1}/wk'),
+                (RED, f'≤{cfg["weekly_min"]}/wk critical'),
+                ("#FEE2CC", "no cases"),
+            ])
+        bar_section = (
+            f'<div style="font-size:9px;color:{TX2};text-transform:uppercase;'
+            f'letter-spacing:.07em;margin-bottom:8px">Weekly Production</div>'
+            f'<div style="display:flex;gap:8px;align-items:flex-end">{bars}</div>'
+            f'<div style="margin-top:8px;display:flex;gap:7px;flex-wrap:wrap">{week_legend}</div>'
+        )
+    else:
+        # ── Week view: one bar per work day (Mon–Fri) ─────────────────────────
+        bars = ""
+        for wd in w_days:
+            n  = inv["by_day"].get(wd["ds"], 0)
+            dc = dot_color(n, cfg["daily_min"], cfg["daily_ideal"])
+            tc = TX if n else "#D1D5DB"
+            bars += (
+                f'<div style="flex:1;text-align:center;min-width:16px">'
+                f'<div style="font-size:9px;font-weight:700;color:{tc};margin-bottom:2px">'
+                f'{"–" if not n else n}</div>'
+                f'<div style="height:22px;background:{dc};border-radius:3px"></div>'
+                f'<div style="font-size:8px;color:{TX2};margin-top:2px">{wd["day"]}</div>'
+                f'</div>')
+        day_legend = "".join(
+            f'<span style="display:flex;align-items:center;gap:3px;font-size:10px;color:{TX2}">'
+            f'<span style="width:9px;height:9px;background:{lc};border-radius:2px;'
+            f'display:inline-block"></span>{ll}</span>'
+            for lc, ll in [
+                (GRN, f'≥{cfg["daily_ideal"]}/day goal'),
+                (ORG, f'6–{cfg["daily_ideal"]-1}/day'),
+                (RED, f'≤{cfg["daily_min"]}/day critical'),
+                ("#FEE2CC", "absent"),
+            ])
+        bar_section = (
+            f'<div style="font-size:9px;color:{TX2};text-transform:uppercase;'
+            f'letter-spacing:.07em;margin-bottom:6px">Daily Production</div>'
+            f'<div style="display:flex;gap:4px;align-items:flex-end;overflow:hidden">{bars}</div>'
+            f'<div style="margin-top:8px;display:flex;gap:7px;flex-wrap:wrap">{day_legend}</div>'
+        )
+
+    plbl = "Month total" if view_is_month else "Week total"
+    prog = (
         f'<div style="display:flex;justify-content:space-between;font-size:12px;'
         f'color:{TX2};margin-bottom:3px"><span>{plbl}</span>'
         f'<span style="font-weight:700;color:{bc}">{inv["total"]} cases</span></div>'
@@ -1182,16 +1273,7 @@ def make_card(inv):
 
     sup_sub = (f'<div style="font-size:10px;color:{TX2}">Support role</div>'
                if inv["support"] else "")
-    legend  = "".join(
-        f'<span style="display:flex;align-items:center;gap:3px;font-size:10px;color:{TX2}">'
-        f'<span style="width:9px;height:9px;background:{lc};border-radius:2px;'
-        f'display:inline-block"></span>{ll}</span>'
-        for lc, ll in [
-            (GRN, f'≥{cfg["daily_ideal"]}/day goal'),
-            (ORG, f'6–{cfg["daily_ideal"]-1}/day'),
-            (RED, f'≤{cfg["daily_min"]}/day critical'),
-            ("#FEE2CC", "absent"),
-        ])
+
     return f"""
     <div style="background:{CARD};border:1px solid {BORD};border-radius:14px;
                 padding:14px 16px;margin-bottom:4px">
@@ -1206,10 +1288,7 @@ def make_card(inv):
                      color:{bc};padding:2px 8px;border-radius:20px">{bl}</span>
       </div>
       {prog}
-      <div style="font-size:9px;color:{TX2};text-transform:uppercase;
-                  letter-spacing:.07em;margin-bottom:6px">Daily Production</div>
-      <div style="display:flex;gap:4px;align-items:flex-end;overflow:hidden">{bars}</div>
-      <div style="margin-top:8px;display:flex;gap:7px;flex-wrap:wrap">{legend}</div>
+      {bar_section}
     </div>"""
 
 
@@ -1301,32 +1380,61 @@ st.markdown("<br>", unsafe_allow_html=True)
 # ─────────────────────────────────────────────────────────────────────────────
 with st.container(border=True):
     st.markdown(
-        f'<div class="sec-lbl">Daily Case Production — {cfg["name"]} · {card_period}</div>',
+        f'<div class="sec-lbl">{"Weekly" if view_is_month else "Daily"} Case Production — '
+        f'{cfg["name"]} · {card_period}</div>',
         unsafe_allow_html=True)
-    x_vals = [wd["label"] for wd in w_days]
-    y_vals = [wd["total"] for wd in w_days]
-    fig_l  = go.Figure()
-    if has_data and any(y_vals):
-        fig_l.add_trace(go.Scatter(
-            x=x_vals, y=y_vals, mode="lines+markers",
-            line=dict(color=ORG, width=2.5), marker=dict(color=ORG, size=8),
-            fill="tozeroy", fillcolor="rgba(249,115,22,0.12)"))
+
+    if view_is_month and w_weeks:
+        # Full month: bar chart with one bar per week
+        x_vals = [f"{w['label']}\n{w['detail']}" for w in w_weeks]
+        y_vals = [w["total"] for w in w_weeks]
+        fig_l  = go.Figure(go.Bar(
+            x=x_vals, y=y_vals,
+            marker_color=[GRN if n >= cfg["weekly_ideal"]
+                          else (ORG if n > cfg["weekly_min"] else RED)
+                          for n in y_vals],
+            marker_line_width=0,
+            text=y_vals, textposition="outside", textfont=dict(color=TX),
+        ))
+        fig_l.add_hline(y=cfg["weekly_ideal"], line_dash="dash", line_color=GRN,
+                        annotation_text=f"Goal ({cfg['weekly_ideal']})",
+                        annotation_position="right", annotation_font_color=GRN)
+        fig_l.add_hline(y=cfg["weekly_min"], line_dash="dash", line_color=RED,
+                        annotation_text=f"Critical ({cfg['weekly_min']})",
+                        annotation_position="right", annotation_font_color=RED)
+        fig_l.update_layout(
+            height=220, margin=dict(t=10,b=10,l=10,r=90),
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            template=PLT, showlegend=False,
+            xaxis=dict(showgrid=False),
+            yaxis=dict(showgrid=True, gridcolor="rgba(249,115,22,0.1)"))
     else:
-        fig_l.add_trace(go.Scatter(
-            x=x_vals, y=[0]*len(x_vals), mode="lines",
-            line=dict(color=BORD, width=2)))
-    fig_l.add_hline(y=cfg["daily_ideal"], line_dash="dash", line_color=GRN,
-                    annotation_text=f"Goal ({cfg['daily_ideal']})", annotation_position="right",
-                    annotation_font_color=GRN)
-    fig_l.add_hline(y=cfg["daily_min"],   line_dash="dash", line_color=RED,
-                    annotation_text=f"Critical ({cfg['daily_min']})", annotation_position="right",
-                    annotation_font_color=RED)
-    fig_l.update_layout(
-        height=220, margin=dict(t=10,b=10,l=10,r=60),
-        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-        template=PLT, showlegend=False,
-        xaxis=dict(showgrid=False),
-        yaxis=dict(showgrid=True, gridcolor="rgba(249,115,22,0.1)"))
+        # Week view: line chart with one point per work day
+        x_vals = [wd["label"] for wd in w_days]
+        y_vals = [wd["total"] for wd in w_days]
+        fig_l  = go.Figure()
+        if has_data and any(y_vals):
+            fig_l.add_trace(go.Scatter(
+                x=x_vals, y=y_vals, mode="lines+markers",
+                line=dict(color=ORG, width=2.5), marker=dict(color=ORG, size=8),
+                fill="tozeroy", fillcolor="rgba(249,115,22,0.12)"))
+        else:
+            fig_l.add_trace(go.Scatter(
+                x=x_vals, y=[0]*len(x_vals), mode="lines",
+                line=dict(color=BORD, width=2)))
+        fig_l.add_hline(y=cfg["daily_ideal"], line_dash="dash", line_color=GRN,
+                        annotation_text=f"Goal ({cfg['daily_ideal']})",
+                        annotation_position="right", annotation_font_color=GRN)
+        fig_l.add_hline(y=cfg["daily_min"], line_dash="dash", line_color=RED,
+                        annotation_text=f"Critical ({cfg['daily_min']})",
+                        annotation_position="right", annotation_font_color=RED)
+        fig_l.update_layout(
+            height=220, margin=dict(t=10,b=10,l=10,r=90),
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            template=PLT, showlegend=False,
+            xaxis=dict(showgrid=False),
+            yaxis=dict(showgrid=True, gridcolor="rgba(249,115,22,0.1)"))
+
     st.plotly_chart(fig_l, use_container_width=True, config={"displayModeBar": False})
 
 st.markdown("<br>", unsafe_allow_html=True)

@@ -928,9 +928,11 @@ with c_ref:
             st.error(st.session_state.xlsx_fetch_err or "Refresh failed.")
 
 # ── Week selector dropdown (Current / Previous) ──────────────────────────────
-# IMPORTANT: do NOT use key= on this selectbox. With a key, Streamlit caches the
-# widget's own value and ignores index= on reruns — causing stale view state.
-# Without a key, index= fully controls the displayed and returned value each run.
+# key="wk_dropdown" is REQUIRED so Streamlit persists the user's selection
+# across reruns. Without it, Streamlit ignores the user's choice and resets
+# to index= on every rerun — making the widget appear frozen.
+# We sync st.session_state["wk_dropdown"] whenever view changes from outside
+# (e.g. tab switch, Full Month toggle) so the dropdown always matches view.
 with c_week:
     if has_weeks:
         def _wk_label(idx, prefix):
@@ -947,19 +949,25 @@ with c_week:
             week_options.append(_wk_label(prev_idx, "← Previous:"))
             week_option_views.append("prev")
 
-        # index= drives the DISPLAYED selection on every run — no key caching
-        _cur_view = view if view in week_option_views else "current"
-        wk_sel_idx = week_option_views.index(_cur_view)
+        # Determine which option matches the current view
+        _target_view = view if view in week_option_views else "current"
+        _target_opt  = week_options[week_option_views.index(_target_view)]
+
+        # Sync session state to match view whenever it changes from outside
+        # (tab switch, Full Month toggle off, etc.)
+        if st.session_state.get("wk_dropdown") != _target_opt and view != "full_month":
+            st.session_state["wk_dropdown"] = _target_opt
 
         wk_choice = st.selectbox(
-            "Week", week_options, index=wk_sel_idx,
+            "Week", week_options,
+            key="wk_dropdown",
             label_visibility="collapsed",
             disabled=(view == "full_month"),
         )
-        # Detect user change and update session state immediately
+        # Detect user changing the dropdown → update view + rerun
         if view != "full_month":
             chosen_view = week_option_views[week_options.index(wk_choice)]
-            if chosen_view != st.session_state.view:
+            if chosen_view != view:
                 st.session_state.view = chosen_view
                 st.rerun()
     else:
@@ -977,8 +985,9 @@ with c_fm:
         disabled=not has_weeks,
     ):
         if view == "full_month":
-            # Toggle off → back to current week
+            # Toggle off → back to current week; also reset dropdown to "current"
             st.session_state.view = "current"
+            st.session_state["wk_dropdown"] = None   # cleared — sync runs on next render
         else:
             st.session_state.view = "full_month"
             # Default full_month_key to current month
@@ -1171,24 +1180,20 @@ has_data = not cases_df.empty
 r_data = cases_df[cases_df["region"] == tab].copy() if has_data else pd.DataFrame()
 
 # STEP 2: country-membership validation.
-# Use DEFAULT_REGIONS (not rcfg) as the authoritative country list.
-# rcfg is dynamically updated from the current week's Summary groups and may
-# drop countries when the Summary changes week-to-week, causing valid cases from
-# other weeks to be silently excluded. DEFAULT_REGIONS always holds the full
-# canonical list for each region.
-_default_countries = set(
-    c for g in DEFAULT_REGIONS[tab]["groups"] for c in g["countries"]
+# Use DEFAULT_REGIONS as the canonical country list for each region.
+# This is stable and never changes between weeks, preventing cases from being
+# dropped when the Summary groups use different labels across weeks.
+# We also include any additional countries found across all Summary groups
+# (handles countries added to a region after DEFAULT_REGIONS was last updated).
+_default_ctrs = set(c for g in DEFAULT_REGIONS[tab]["groups"] for c in g["countries"])
+_rkey = "mcc" if tab == "MCC" else "cs"
+_extra_ctrs   = set(
+    c for w in all_weeks
+    for g in w.get(_rkey, {}).get("groups", [])
+    for c in g.get("countries", [])
+    if c  # skip empty strings
 )
-# Also include any countries present in all Summary groups across all weeks
-# (e.g. countries added by a newer batch that aren't in DEFAULT_REGIONS yet)
-_summary_countries = set()
-for _w in all_weeks:
-    _rk = "mcc" if tab == "MCC" else "cs"
-    for _g in _w.get(_rk, {}).get("groups", []):
-        for _c in _g.get("countries", []):
-            _summary_countries.add(_c)
-
-region_countries = _default_countries | _summary_countries
+region_countries = _default_ctrs | _extra_ctrs
 
 if not r_data.empty:
     r_data = r_data[r_data["country"].isin(region_countries)]
@@ -1364,6 +1369,28 @@ else:
 # METRIC ROW
 # ─────────────────────────────────────────────────────────────────────────────
 period_lbl = "Monthly quota" if view_is_month else "Weekly quota"
+
+# ── Data audit notice — shown when w_data exists but new_w_data is 0 ──────────
+_all_delivered = has_batch_data and total_all > 0 and total_new == 0
+_no_data_yet   = total_all == 0
+
+if _all_delivered:
+    st.markdown(
+        f'<div style="background:{OL};border:1px solid {OB};border-radius:8px;'
+        f'padding:8px 14px;font-size:12px;color:#92400E;margin-bottom:8px">'
+        f'✅ <b>{total_all} cases generated</b> for {view_label} — '
+        f'all {total_deliv} are already in a previous batch delivery. '
+        f'Batch progress = 0 new cases. Investigator detail shows below.</div>',
+        unsafe_allow_html=True)
+elif _no_data_yet:
+    _r_total = len(r_data) if not r_data.empty else 0
+    st.markdown(
+        f'<div style="background:{CARD};border:1px solid {BORD};border-radius:8px;'
+        f'padding:8px 14px;font-size:12px;color:{TX2};margin-bottom:8px">'
+        f'ℹ️ No cases found for <b>{view_label}</b> in {cfg["name"]}. '
+        f'Total region cases loaded: <b>{_r_total}</b>. '
+        f'Check that the file is up to date — use 🔄 Refresh.</div>',
+        unsafe_allow_html=True)
 
 # Build delivered-batch indicator (shown only when history is loaded)
 _deliv_tag = ""

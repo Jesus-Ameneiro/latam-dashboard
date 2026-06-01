@@ -2086,6 +2086,71 @@ def generate_weekly_report(tab, cfg, inv_data_df, disq_df,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# GLOBAL INVESTIGATOR VIEW — all regions combined for the selected week
+# Shows every investigator's total across MCC + CS regardless of current tab.
+# ─────────────────────────────────────────────────────────────────────────────
+st.markdown("<br>", unsafe_allow_html=True)
+
+with st.container(border=True):
+    st.markdown('<div class="sec-lbl">🌎 All Cases by Investigator — Both Regions · ' +
+                (fmt_date_range(week_start_str, week_end_str) if week_start_str and week_end_str
+                 else sel_week["label"]) + '</div>',
+                unsafe_allow_html=True)
+
+    # All valid cases across both regions, filtered by calendar week dates
+    _all_df = cases_df.copy() if has_data else pd.DataFrame()
+    if not _all_df.empty and week_start_str and week_end_str:
+        _all_week = _all_df[
+            (_all_df["date"] >= week_start_str) &
+            (_all_df["date"] <= week_end_str)
+        ]
+    else:
+        _all_week = pd.DataFrame()
+
+    if not _all_week.empty:
+        _global = (_all_week.groupby("investigator").size()
+                   .sort_values(ascending=True)
+                   .reset_index(name="total"))
+        _total_global = _global["total"].sum()
+        _global["pct"] = (_global["total"] / _total_global * 100).round(1)
+        _global["label"] = _global.apply(
+            lambda r: f'{r["total"]} ({r["pct"]:.0f}%)', axis=1)
+
+        fig_g = go.Figure(go.Bar(
+            x=_global["total"],
+            y=_global["investigator"],
+            orientation="h",
+            marker_color=ORG,
+            marker_line_width=0,
+            text=_global["label"],
+            textposition="outside",
+            textfont=dict(color=TX),
+        ))
+        fig_g.update_layout(
+            height=max(240, len(_global) * 38),
+            margin=dict(t=10, b=10, l=10, r=90),
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            template=PLT,
+            xaxis=dict(showgrid=True, gridcolor="rgba(249,115,22,0.1)"),
+            yaxis=dict(showgrid=False, autorange="reversed"),
+        )
+        st.plotly_chart(fig_g, width='stretch', config={"displayModeBar": False})
+
+        # Summary line
+        _n_inv = len(_global)
+        st.markdown(
+            f'<div style="font-size:11px;color:{TX2};text-align:right;margin-top:-8px">'
+            f'{_n_inv} investigators · {_total_global} total cases · '
+            f'{fmt_date_range(week_start_str, week_end_str)}'
+            f'</div>',
+            unsafe_allow_html=True)
+    else:
+        st.markdown(
+            f'<div style="font-size:12px;color:{TX2};padding:12px">No cases for this week.</div>',
+            unsafe_allow_html=True)
+
+# ─────────────────────────────────────────────────────────────────────────────
 # REPORT BUTTONS — below the main dashboard
 # ─────────────────────────────────────────────────────────────────────────────
 st.markdown("<br>", unsafe_allow_html=True)

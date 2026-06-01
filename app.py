@@ -86,8 +86,10 @@ for k, v in [
     ("_daily_rpt_bytes",  None),
     ("_daily_rpt_date",   None),
     ("_weekly_rpt_bytes", None),
+    ("_global_rpt_bytes", None),
     ("_gen_daily",        False),
     ("_gen_weekly",       False),
+    ("_gen_global",       False),
     ("_rpt_error",        None),
     ("dark",             True),
     ("rcfg",             copy.deepcopy(DEFAULT_REGIONS)),
@@ -2090,8 +2092,189 @@ def generate_weekly_report(tab, cfg, inv_data_df, disq_df,
     return buf.getvalue()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# GLOBAL INVESTIGATOR VIEW — all regions combined for the selected week
+def generate_global_weekly_report(all_cases_df, all_disq_df,
+                                   week_start, week_end, sel_week_label,
+                                   w_days, cfg_mcc, cfg_cs):
+    """Global weekly report — all investigators from both MCC and CS."""
+    import pandas as pd
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Global Weekly Report"
+
+    BG_DARK = "1A1614"; BG_ORG = "F97316"; BG_LIGHT = "FFF8F4"
+    BG_HDR  = "2D2520"; BG_ROW1 = "FFFFFF"; BG_ROW2 = "FFF3EA"
+    TXT_W   = "FAFAF9"; TXT_D   = "1C1917"; TXT_MUT = "78716C"
+    BG_MCC  = "FFF3EA"; BG_CS   = "EAF3FF"
+
+    day_cols = [d["ds"] for d in w_days]
+    day_lbls = [d["day"] for d in w_days]
+    n_days   = len(day_cols)
+
+    # Columns: Investigator | Region | Mon…Fri | Week Total | Disq | Net | Goal | Status
+    total_cols = 2 + n_days + 5
+    last_col   = total_cols
+
+    # Column widths
+    ws.column_dimensions["A"].width = 24   # Investigator
+    ws.column_dimensions["B"].width = 8    # Region
+    for i in range(n_days):
+        ws.column_dimensions[get_column_letter(3 + i)].width = 9
+    off = 3 + n_days
+    for i, w in enumerate([11, 9, 9, 9, 13]):
+        ws.column_dimensions[get_column_letter(off + i)].width = w
+    ws.row_dimensions[1].height = 36
+
+    # Filter both to calendar week
+    if not all_cases_df.empty and week_start and week_end:
+        inv_df = all_cases_df[
+            (all_cases_df["date"] >= week_start) &
+            (all_cases_df["date"] <= week_end)
+        ]
+    else:
+        inv_df = pd.DataFrame()
+
+    if not all_disq_df.empty and week_start and week_end:
+        dq_df = all_disq_df[
+            (all_disq_df["date"] >= week_start) &
+            (all_disq_df["date"] <= week_end)
+        ]
+    else:
+        dq_df = pd.DataFrame()
+
+    # ── Header ────────────────────────────────────────────────────────────────
+    ws.merge_cells(f"A1:{get_column_letter(last_col)}1")
+    _rpt_cell(ws, 1, 1, "RUVIXX  ·  Global Weekly Case Investigation Report",
+              bold=True, bg=BG_DARK, fg=TXT_W, align="left", size=13, border=False)
+
+    ws.merge_cells(f"A2:{get_column_letter(max(1, last_col-2))}2")
+    _rpt_cell(ws, 2, 1,
+              f"Week: {sel_week_label}   |   All Regions (MCC + CS)   |   {week_start} → {week_end}",
+              bg=BG_HDR, fg="F97316", align="left", size=9, border=False)
+    ws.merge_cells(f"{get_column_letter(last_col-1)}2:{get_column_letter(last_col)}2")
+    _rpt_cell(ws, 2, last_col-1,
+              f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+              bg=BG_HDR, fg=TXT_MUT, align="right", size=9, border=False)
+
+    # ── Summary strip ─────────────────────────────────────────────────────────
+    r = 4
+    for ci, lbl in enumerate(["Total Cases","Disq/Rejected","MCC Cases",
+                               "CS Cases","Investigators","Combined Goal"], 1):
+        _rpt_cell(ws, r, ci, lbl, bold=True, bg=BG_ORG, fg=TXT_W, align="center", size=9)
+
+    r = 5
+    mcc_total = len(inv_df[inv_df["region"]=="MCC"]) if not inv_df.empty else 0
+    cs_total  = len(inv_df[inv_df["region"]=="CS"])  if not inv_df.empty else 0
+    total_gen = len(inv_df) if not inv_df.empty else 0
+    total_dq  = len(dq_df)  if not dq_df.empty  else 0
+    n_inv     = inv_df["investigator"].nunique() if not inv_df.empty else 0
+    combined_goal = cfg_mcc["weekly_ideal"] + cfg_cs["weekly_ideal"]
+    for ci, val in enumerate([total_gen, total_dq, mcc_total,
+                               cs_total, n_inv, combined_goal], 1):
+        _rpt_cell(ws, r, ci, val, bold=True, bg=BG_LIGHT, align="center", size=11)
+
+    # ── Investigator table ────────────────────────────────────────────────────
+    r = 7
+    ws.merge_cells(f"A{r}:{get_column_letter(last_col)}{r}")
+    _rpt_cell(ws, r, 1, "INVESTIGATOR PERFORMANCE — ALL REGIONS · DAILY BREAKDOWN",
+              bold=True, bg=BG_ORG, fg=TXT_W, align="left", size=9, border=False)
+
+    r = 8
+    ws.row_dimensions[r].height = 28
+    _rpt_cell(ws, r, 1, "Investigator", bold=True, bg="E7E7E7", fg=TXT_D, align="center", size=9)
+    _rpt_cell(ws, r, 2, "Region",       bold=True, bg="E7E7E7", fg=TXT_D, align="center", size=9)
+    for di, (ds, dlbl) in enumerate(zip(day_cols, day_lbls)):
+        _rpt_cell(ws, r, 3+di, f"{dlbl}\n{ds[5:]}", bold=True, bg="E7E7E7",
+                  fg=TXT_D, align="center", size=8, wrap=True)
+    off2 = 3 + n_days
+    for ci, lbl in enumerate(["Week Total","Disq","Net Valid",
+                               "Goal","Status"], off2):
+        _rpt_cell(ws, r, ci, lbl, bold=True, bg="E7E7E7", fg=TXT_D, align="center", size=9)
+
+    # Build per-investigator rows, sorted by total descending
+    all_invs_data = []
+    if not inv_df.empty:
+        for inv_name, grp in inv_df.groupby("investigator"):
+            region = grp["region"].mode()[0] if not grp.empty else "MCC"
+            cfg_r  = cfg_mcc if region == "MCC" else cfg_cs
+            wt     = len(grp)
+            dq     = len(dq_df[dq_df["investigator"]==inv_name]) if not dq_df.empty else 0
+            all_invs_data.append((wt, inv_name, region, grp, dq, cfg_r))
+    all_invs_data.sort(key=lambda x: -x[0])
+
+    for i, (wt, inv_name, region, grp, dq, cfg_r) in enumerate(all_invs_data):
+        r += 1
+        # Color rows by region for quick visual scan
+        bg     = (BG_MCC if region=="MCC" else BG_CS) if i % 2 == 0 else BG_ROW1
+        status = _week_badge(wt, cfg_r["weekly_min"], cfg_r["weekly_ideal"])
+        s_col  = "16A34A" if "Goal" in status else ("EF4444" if "Critical" in status else "D97706")
+        reg_col = "F97316" if region == "MCC" else "2563EB"
+
+        _rpt_cell(ws, r, 1, inv_name, bg=bg, fg=TXT_D, bold=True)
+        _rpt_cell(ws, r, 2, region,   bg=bg, fg=reg_col, align="center", bold=True, size=9)
+
+        for di, ds in enumerate(day_cols):
+            day_n = len(grp[grp["date"]==ds])
+            day_c = ("16A34A" if day_n >= cfg_r["daily_ideal"]
+                     else ("EF4444" if 0 < day_n <= cfg_r["daily_min"]
+                           else (TXT_MUT if day_n == 0 else "D97706")))
+            _rpt_cell(ws, r, 3+di, day_n if day_n else "–",
+                      bg=bg, fg=day_c, align="center",
+                      bold=(day_n >= cfg_r["daily_ideal"]))
+
+        _rpt_cell(ws, r, off2,   wt, bg=bg, fg=TXT_D, align="center", bold=True)
+        _rpt_cell(ws, r, off2+1, dq if dq else "–", bg=bg,
+                  fg="EF4444" if dq else TXT_MUT, align="center", bold=dq>0)
+        _rpt_cell(ws, r, off2+2, wt, bg=bg, fg=TXT_D, align="center")
+        _rpt_cell(ws, r, off2+3, cfg_r["weekly_ideal"], bg=bg, fg=TXT_MUT, align="center")
+        _rpt_cell(ws, r, off2+4, status, bg=bg, fg=s_col, align="center", bold=True)
+
+    if not all_invs_data:
+        r += 1
+        ws.merge_cells(f"A{r}:{get_column_letter(last_col)}{r}")
+        _rpt_cell(ws, r, 1, "No cases recorded for this week.", bg=BG_LIGHT, fg=TXT_MUT, align="center")
+
+    # ── Region legend ─────────────────────────────────────────────────────────
+    r += 1
+    ws.merge_cells(f"A{r}:{get_column_letter(last_col)}{r}")
+    _rpt_cell(ws, r, 1, "Row color: orange = México Central Caribe · blue = Cono Sur",
+              bg="F5F5F5", fg=TXT_MUT, align="center", size=8, border=False)
+
+    # ── Country breakdown ─────────────────────────────────────────────────────
+    r += 2
+    ws.merge_cells(f"A{r}:C{r}")
+    _rpt_cell(ws, r, 1, "CASES BY COUNTRY — BOTH REGIONS",
+              bold=True, bg=BG_ORG, fg=TXT_W, align="left", size=9, border=False)
+    ws.merge_cells(f"D{r}:{get_column_letter(last_col)}{r}")
+    _rpt_cell(ws, r, 4, "", bg=BG_ORG, border=False)
+
+    if not inv_df.empty:
+        by_ctr = inv_df.groupby("country").size().sort_values(ascending=False)
+        for j, (ctr, cnt) in enumerate(by_ctr.items()):
+            r += 1
+            bg = BG_ROW1 if j % 2 == 0 else BG_ROW2
+            _rpt_cell(ws, r, 1, ctr, bg=bg, fg=TXT_D)
+            _rpt_cell(ws, r, 2, cnt, bg=bg, fg=TXT_D, align="center", bold=True)
+            ws.merge_cells(f"C{r}:{get_column_letter(last_col)}{r}")
+            _rpt_cell(ws, r, 3, f"{round(cnt/len(inv_df)*100)}%", bg=bg, fg=TXT_MUT)
+
+    # ── Footer ────────────────────────────────────────────────────────────────
+    r += 2
+    ws.merge_cells(f"A{r}:{get_column_letter(last_col)}{r}")
+    _rpt_cell(ws, r, 1,
+              f"Ruvixx · Case Investigation · Global Report · MCC: {cfg_mcc['contact']} · CS: {cfg_cs['contact']}",
+              bg=BG_DARK, fg=TXT_MUT, align="center", size=8, border=False)
+
+    ws.print_area = f"A1:{get_column_letter(last_col)}{r}"
+    ws.page_setup.fitToPage   = True
+    ws.page_setup.fitToWidth  = 1
+    ws.page_setup.fitToHeight = 0
+    ws.page_setup.orientation = "landscape"
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf.getvalue()
 # Shows every investigator's total across MCC + CS regardless of current tab.
 # ─────────────────────────────────────────────────────────────────────────────
 st.markdown("<br>", unsafe_allow_html=True)
@@ -2217,23 +2400,52 @@ if st.session_state._gen_weekly:
     except Exception as e:
         st.session_state._rpt_error = f"Weekly report failed: {e}"
 
+if st.session_state._gen_global:
+    st.session_state._gen_global  = False
+    st.session_state._rpt_error   = None
+    try:
+        all_cases_global = pd.DataFrame(st.session_state.all_cases) if st.session_state.all_cases else pd.DataFrame()
+        all_disq_global  = pd.DataFrame(st.session_state.all_disq_cases) if st.session_state.all_disq_cases else pd.DataFrame()
+        rpt_bytes = generate_global_weekly_report(
+            all_cases_df=all_cases_global,
+            all_disq_df=all_disq_global,
+            week_start=week_start_str,
+            week_end=week_end_str,
+            sel_week_label=sel_week["label"],
+            w_days=w_days,
+            cfg_mcc=st.session_state.rcfg["MCC"],
+            cfg_cs=st.session_state.rcfg["CS"],
+        )
+        st.session_state["_global_rpt_bytes"] = rpt_bytes
+        st.session_state["_daily_rpt_bytes"]  = None
+        st.session_state["_weekly_rpt_bytes"] = None
+    except Exception as e:
+        st.session_state._rpt_error = f"Global report failed: {e}"
+
 # ── Report buttons ─────────────────────────────────────────────────────────────
 def _req_daily():   st.session_state._gen_daily  = True
 def _req_weekly():  st.session_state._gen_weekly = True
+def _req_global():  st.session_state._gen_global = True
 
-rb1, rb2, rb3 = st.columns([1, 1, 3])
+rb1, rb2, rb3 = st.columns([1, 1, 1])
 
 with rb1:
     st.button("📊 Daily Report", key="btn_daily_rpt",
               use_container_width=True, type="secondary",
               on_click=_req_daily,
-              help="Daily snapshot for the most recent worked day in this week")
+              help="Daily snapshot for the most recent worked day — current region")
 
 with rb2:
-    st.button("📋 Weekly Report", key="btn_weekly_rpt",
+    st.button("📋 Weekly Regional", key="btn_weekly_rpt",
               use_container_width=True, type="secondary",
               on_click=_req_weekly,
-              help="Full Mon–Fri breakdown for the selected week")
+              help=f"Weekly breakdown for {cfg['name']} only")
+
+with rb3:
+    st.button("🌎 Weekly Global", key="btn_global_rpt",
+              use_container_width=True, type="secondary",
+              on_click=_req_global,
+              help="Weekly breakdown for all investigators across MCC + CS")
 
 if st.session_state._rpt_error:
     st.error(st.session_state._rpt_error)
@@ -2241,6 +2453,7 @@ if st.session_state._rpt_error:
 # ── Download buttons appear once report is ready ─────────────────────────────
 _daily_bytes  = st.session_state.get("_daily_rpt_bytes")
 _weekly_bytes = st.session_state.get("_weekly_rpt_bytes")
+_global_bytes = st.session_state.get("_global_rpt_bytes")
 _rpt_date     = st.session_state.get("_daily_rpt_date") or ""
 
 if _daily_bytes:
@@ -2261,4 +2474,14 @@ if _weekly_bytes:
             file_name=f"Ruvixx_Weekly_{tab}_{week_start_str}_{week_end_str}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key="dl_weekly", use_container_width=True, type="primary",
+        )
+
+if _global_bytes:
+    with rb3:
+        st.download_button(
+            label=f"⬇️ Download Global — {sel_week['label']}",
+            data=_global_bytes,
+            file_name=f"Ruvixx_Global_{week_start_str}_{week_end_str}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="dl_global", use_container_width=True, type="primary",
         )

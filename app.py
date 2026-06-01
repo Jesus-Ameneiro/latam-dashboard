@@ -915,7 +915,17 @@ view      = st.session_state.view
 has_weeks = bool(all_weeks)
 has_prev  = has_weeks and (prev_idx != cur_idx)
 
-c_ref, c_week, c_fm, c_msel, c_st = st.columns([1.4, 2.3, 1.3, 1.9, 2.9])
+# Build week button labels
+def _wk_date(idx):
+    w = all_weeks[idx]
+    if w.get("start") and w.get("end"):
+        return fmt_date_range(w["start"], w["end"])
+    return f"Week {w['week_num']}"
+
+_cur_lbl  = f"★ Current: {_wk_date(cur_idx)}"  if has_weeks else "★ Current"
+_prev_lbl = f"← Previous: {_wk_date(prev_idx)}" if has_prev  else "← Previous"
+
+c_ref, c_cur, c_prev, c_fm, c_msel, c_st = st.columns([1.3, 2.0, 2.0, 1.3, 1.8, 2.3])
 
 with c_ref:
     if st.button("🔄 Refresh", key="btn_refresh",
@@ -930,59 +940,30 @@ with c_ref:
         else:
             st.error(st.session_state.xlsx_fetch_err or "Refresh failed.")
 
-# ── Week selector dropdown (Current / Previous) ──────────────────────────────
-# Design rules:
-#  1. key="wk_dropdown" makes Streamlit persist the user's selection in
-#     st.session_state["wk_dropdown"] — it must never be overwritten except on
-#     controlled external resets.
-#  2. We ONLY reset the dropdown state when _reset_wk_dropdown=True (set by
-#     load_xlsx or Full Month toggle-off). Any other preemptive override
-#     reverts the user's selection before we read it → infinite revert loop.
-#  3. After reading the user's choice, if it differs from view, update view
-#     and rerun. Streamlit will then show the correct data for the new week.
-with c_week:
-    if has_weeks:
-        def _wk_label(idx, prefix):
-            w = all_weeks[idx]
-            if w.get("start") and w.get("end"):
-                return f"{prefix} {fmt_date_range(w['start'], w['end'])}"
-            return f"{prefix} Week {w['week_num']}"
+# ── Week buttons — same stateless pattern as MCC/CS region tabs ──────────────
+# st.button() is stateless: on click it sets session state and reruns.
+# No widget key persistence issues — the most reliable pattern in Streamlit.
+with c_cur:
+    if st.button(
+        _cur_lbl,
+        key="btn_week_cur",
+        type="primary" if view == "current" else "secondary",
+        use_container_width=True,
+        disabled=not has_weeks or view == "full_month",
+    ):
+        st.session_state.view = "current"
+        st.rerun()
 
-        week_options      = []
-        week_option_views = []
-        week_options.append(_wk_label(cur_idx, "★ Current:"))
-        week_option_views.append("current")
-        if has_prev:
-            week_options.append(_wk_label(prev_idx, "← Previous:"))
-            week_option_views.append("prev")
-
-        # Reset dropdown ONLY when explicitly flagged (file reload / FM toggle-off)
-        if st.session_state._reset_wk_dropdown:
-            st.session_state["wk_dropdown"] = week_options[0]  # "★ Current:…"
-            st.session_state._reset_wk_dropdown = False
-
-        # If the stored value is stale (not in current options), fix it quietly
-        if st.session_state.get("wk_dropdown") not in week_options:
-            _fallback_view = view if view in week_option_views else "current"
-            st.session_state["wk_dropdown"] = week_options[week_option_views.index(_fallback_view)]
-
-        wk_choice = st.selectbox(
-            "Week", week_options,
-            key="wk_dropdown",
-            label_visibility="collapsed",
-            disabled=(view == "full_month"),
-        )
-
-        # Detect user changing the dropdown → update view, rerun to apply
-        if view != "full_month":
-            chosen_view = week_option_views[week_options.index(wk_choice)]
-            if chosen_view != view:
-                st.session_state.view = chosen_view
-                st.rerun()
-    else:
-        st.markdown(
-            f'<div style="font-size:11px;color:{TX2};padding-top:8px">'
-            f'Waiting for data…</div>', unsafe_allow_html=True)
+with c_prev:
+    if st.button(
+        _prev_lbl,
+        key="btn_week_prev",
+        type="primary" if view == "prev" else "secondary",
+        use_container_width=True,
+        disabled=not has_prev or view == "full_month",
+    ):
+        st.session_state.view = "prev"
+        st.rerun()
 
 # ── Full Month toggle ─────────────────────────────────────────────────────────
 with c_fm:
@@ -994,12 +975,9 @@ with c_fm:
         disabled=not has_weeks,
     ):
         if view == "full_month":
-            # Toggle off → back to current week; flag dropdown to reset on next render
-            st.session_state.view = "current"
-            st.session_state._reset_wk_dropdown = True
+            st.session_state.view = "current"   # toggle off → back to current week
         else:
             st.session_state.view = "full_month"
-            # Default full_month_key to current month
             if not st.session_state.full_month_key and has_weeks:
                 st.session_state.full_month_key = all_weeks[cur_idx]["month_key"]
         st.rerun()
@@ -1256,26 +1234,36 @@ else:
     view_label = sel_week["label"]
 
 # ── Batch-history exclusion ───────────────────────────────────────────────────
-# delivered_ids: set of case IDs already shipped in a previous batch for this region.
-# new_w_data: valid cases in the current view that are NOT yet delivered.
-# These drive the batch progress metrics (donut, group breakdown, highlights).
-# Investigator cards use w_data (all valid cases — their full productivity).
-delivered_ids   = st.session_state.delivered_ids.get(tab, set())
-has_batch_data  = st.session_state.batch_fetch_ok
+# delivered_ids: set of case IDs already shipped in a previous batch.
+# new_w_data   : valid cases NOT yet in any delivered batch = current batch work.
+# Investigator cards always use w_data (full productivity, all valid cases).
+delivered_ids  = st.session_state.delivered_ids.get(tab, set())
+has_batch_data = st.session_state.batch_fetch_ok
 
 new_w_data = (w_data[~w_data["case_id"].isin(delivered_ids)]
               if not w_data.empty and delivered_ids
               else w_data.copy())
 
-# ── Batch progress totals (data-sheet driven, batch-filtered) ─────────────────
-# total_new   = new cases not in any previous batch  → current batch progress
-# total_deliv = cases from the current view already in a previous batch
+# ── Current batch number: latest delivered batch for this region + 1 ──────────
+_bh = st.session_state.batch_history or {}
+_region_batches = _bh.get(tab, [])
+if _region_batches and has_batch_data:
+    _last_batch_num = max(b.get("batch_number", 0) for b in _region_batches)
+    current_batch_num = _last_batch_num + 1
+    batch_label = f"Batch #{current_batch_num}"
+else:
+    current_batch_num = None
+    batch_label = "Current Batch"
+
+# ── Batch progress totals ─────────────────────────────────────────────────────
+# total_new   = cases for current batch (not in any delivered batch)
+# total_deliv = cases already in a previous delivered batch
 # total_all   = all valid cases this period (investigator productivity)
 total_new   = len(new_w_data) if not new_w_data.empty else 0
 total_deliv = (len(w_data) - total_new) if not w_data.empty else 0
 total_all   = len(w_data) if not w_data.empty else 0
 
-# For the headline donut: progress = new cases / target quota
+# Donut = current batch progress vs quota target
 total = total_new
 gap   = max(0, tq - total)
 pct   = round(total / tq * 100) if tq else 0
@@ -1392,7 +1380,7 @@ else:
 # ─────────────────────────────────────────────────────────────────────────────
 period_lbl = "Monthly quota" if view_is_month else "Weekly quota"
 
-# ── Data audit notice — shown when w_data exists but new_w_data is 0 ──────────
+# ── Status notices ────────────────────────────────────────────────────────────
 _all_delivered = has_batch_data and total_all > 0 and total_new == 0
 _no_data_yet   = total_all == 0
 
@@ -1401,8 +1389,8 @@ if _all_delivered:
         f'<div style="background:{OL};border:1px solid {OB};border-radius:8px;'
         f'padding:8px 14px;font-size:12px;color:#92400E;margin-bottom:8px">'
         f'✅ <b>{total_all} cases generated</b> for {view_label} — '
-        f'all {total_deliv} are already in a previous batch delivery. '
-        f'Batch progress = 0 new cases. Investigator detail shows below.</div>',
+        f'all are already delivered in a previous batch. '
+        f'<b>{batch_label}</b> progress = 0. Investigator detail shows below.</div>',
         unsafe_allow_html=True)
 elif _no_data_yet:
     _r_total = len(r_data) if not r_data.empty else 0
@@ -1411,18 +1399,18 @@ elif _no_data_yet:
         f'padding:8px 14px;font-size:12px;color:{TX2};margin-bottom:8px">'
         f'ℹ️ No cases found for <b>{view_label}</b> in {cfg["name"]}. '
         f'Total region cases loaded: <b>{_r_total}</b>. '
-        f'Check that the file is up to date — use 🔄 Refresh.</div>',
+        f'Check the file is up to date — use 🔄 Refresh.</div>',
         unsafe_allow_html=True)
 
-# Build delivered-batch indicator (shown only when history is loaded)
+# Build delivered-batch sub-label for the Cases Generated metric
 _deliv_tag = ""
 if has_batch_data and total_deliv > 0:
-    _deliv_tag = (f'<div style="font-size:9px;color:{TX2};margin-top:3px">'
-                  f'<span style="color:{GRN}">+{total_new} new</span>'
-                  f' · <span style="color:{TX2}">{total_deliv} prev batch</span></div>')
-elif has_batch_data:
-    _deliv_tag = (f'<div style="font-size:9px;color:{GRN};margin-top:3px">'
-                  f'All new · no overlap</div>')
+    _deliv_tag = (f'<div style="font-size:9px;color:{TX2};margin-top:2px">'
+                  f'<span style="color:{GRN}">{total_new} for {batch_label}</span>'
+                  f' · {total_deliv} delivered</div>')
+elif has_batch_data and total_new > 0:
+    _deliv_tag = (f'<div style="font-size:9px;color:{GRN};margin-top:2px">'
+                  f'All new · {batch_label}</div>')
 
 st.markdown(f"""
 <div style="display:flex;justify-content:flex-end;align-items:center;
@@ -1433,12 +1421,12 @@ st.markdown(f"""
     {_deliv_tag}
   </div>
   <div style="text-align:center">
-    <div style="font-size:22px;font-weight:800;color:{ORG};line-height:1">{gap}</div>
-    <div style="font-size:9px;color:{TX2};text-transform:uppercase;letter-spacing:.06em">Batch Gap</div>
+    <div style="font-size:22px;font-weight:800;color:{ORG};line-height:1">{total}</div>
+    <div style="font-size:9px;color:{TX2};text-transform:uppercase;letter-spacing:.06em">{batch_label}</div>
   </div>
   <div style="text-align:center">
     <div style="font-size:22px;font-weight:800;color:{ORG};line-height:1">{pct}%</div>
-    <div style="font-size:9px;color:{TX2};text-transform:uppercase;letter-spacing:.06em">Batch Progress</div>
+    <div style="font-size:9px;color:{TX2};text-transform:uppercase;letter-spacing:.06em">of {tq} quota</div>
   </div>
   <div style="text-align:right">
     <div style="font-size:12px;font-weight:700;color:{TX}">Trimble LATAM</div>
@@ -1498,14 +1486,12 @@ with mc1:
             hole=0.72, sort=False, textinfo="none", hoverinfo="none",
             marker_colors=[ORG, ABSC], showlegend=False,
         ))
-        # total here = total_new (batch-filtered); total_all = all generated
-        _inner_top   = f"<b>{total}</b>" if not has_batch_data else f"<b>{total}</b>"
-        _inner_label = "/ " + str(tq) + " quota"
+        # total here = total_new (cases for current batch)
         for txt, yp, sz, col in [
-            (_inner_top,    0.57, 26, TX),
-            (_inner_label,  0.44, 10, TX2),
-            (f"<b>{pct}%</b>", 0.30, 14, ORG),
-            (period_lbl.upper(), 0.16, 8, TX2),
+            (f"<b>{total}</b>",    0.57, 26, TX),
+            (f"/ {tq} quota",     0.44, 10, TX2),
+            (f"<b>{pct}%</b>",    0.30, 14, ORG),
+            (batch_label.upper(), 0.16,  8, TX2),
         ]:
             fig_g.add_annotation(text=txt, x=0.5, y=yp, showarrow=False,
                                   font=dict(size=sz, color=col))
@@ -1554,11 +1540,11 @@ with mc3:
     with st.container(border=True):
         st.markdown('<div class="sec-lbl">⚡ Key Highlights</div>',
                     unsafe_allow_html=True)
-        hl = [{"c": ORG, "t": "Current batch progress",
-               "s": f"{total}/{tq} new cases — {gap} remaining"}]
+        hl = [{"c": ORG, "t": f"{batch_label} progress",
+               "s": f"{total}/{tq} — {gap} remaining"}]
         if has_batch_data and total_deliv > 0:
             hl.insert(0, {"c": TX2, "t": "Previously delivered",
-                          "s": f"{total_deliv} cases already in past batches"})
+                          "s": f"{total_deliv} cases already in a past batch"})
         for g in groups:
             left = max(0, g["eff_quota"] - g["done"])
             hc   = GRN if left==0 else (ORG if g["done"]/max(g["eff_quota"],1) >= 0.6 else RED)

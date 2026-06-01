@@ -77,24 +77,22 @@ DEFAULT_REGIONS = {
 EMPTY_DF = pd.DataFrame(columns=["date","case_id","country","investigator",
                                   "week_num","region","month_key"])
 for k, v in [
+    # ── Core data ─────────────────────────────────────────────────────────────
     ("all_cases",        []),
     ("all_weeks",        []),
     ("all_disq_cases",   []),
     ("current_week_idx", 0),
     ("prev_week_idx",    0),
+    # ── View state ────────────────────────────────────────────────────────────
     ("view",             "current"),   # "prev" | "current"
-    ("_daily_rpt_bytes",  None),
-    ("_daily_rpt_date",   None),
-    ("_weekly_rpt_bytes", None),
-    ("_global_rpt_bytes", None),
-    ("_gen_daily",        False),
-    ("_gen_weekly",       False),
-    ("_gen_global",       False),
-    ("_rpt_error",        None),
+    ("full_month_key",   None),
+    ("tab",              "MCC"),       # active region tab
+    # ── Theme ─────────────────────────────────────────────────────────────────
     ("dark",             True),
-    ("rcfg",             copy.deepcopy(DEFAULT_REGIONS)),
     ("_prev_dark",       None),
-    # ── xlsx fetch state ──────────────────────────────────────────────────────
+    # ── Region config ─────────────────────────────────────────────────────────
+    ("rcfg",             copy.deepcopy(DEFAULT_REGIONS)),
+    # ── xlsx fetch ────────────────────────────────────────────────────────────
     ("xlsx_fetch_ok",    False),
     ("xlsx_last_sha",    None),
     ("xlsx_fetch_ts",    None),
@@ -103,7 +101,15 @@ for k, v in [
     ("batch_history",    None),
     ("delivered_ids",    {"MCC": set(), "CS": set()}),
     ("batch_fetch_ok",   False),
-    # ── UI sync ───────────────────────────────────────────────────────────────
+    # ── Report generation ─────────────────────────────────────────────────────
+    ("_daily_rpt_bytes",  None),
+    ("_daily_rpt_date",   None),
+    ("_weekly_rpt_bytes", None),
+    ("_global_rpt_bytes", None),
+    ("_gen_daily",        False),
+    ("_gen_weekly",       False),
+    ("_gen_global",       False),
+    ("_rpt_error",        None),
 ]:
     if k not in st.session_state:
         st.session_state[k] = v

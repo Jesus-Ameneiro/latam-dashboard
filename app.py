@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime, date, timedelta
-import re, copy, base64
+import re, copy, base64, io
 from openpyxl import load_workbook
 import requests
 
@@ -82,16 +82,20 @@ for k, v in [
     ("current_week_idx", 0),
     ("prev_week_idx",    0),
     ("view",             "current"),   # "prev" | "current" | "full_month"
-    ("full_month_key",   None),        # month_key shown in full_month view
-    ("file_name",        None),
+    ("full_month_key",   None),
     ("tab",              "MCC"),
     ("dark",             True),
     ("rcfg",             copy.deepcopy(DEFAULT_REGIONS)),
     ("_prev_dark",       None),
+    # ── xlsx fetch state ──────────────────────────────────────────────────────
+    ("xlsx_fetch_ok",    False),       # True once xlsx loaded from GitHub
+    ("xlsx_last_sha",    None),        # GitHub SHA of the last fetched xlsx
+    ("xlsx_fetch_ts",    None),        # ISO timestamp of last successful fetch
+    ("xlsx_fetch_err",   None),        # last error message, or None
     # ── Batch history (from prebatch-delivery GitHub repo) ────────────────────
-    ("batch_history",    None),        # raw JSON dict: {"MCC": [...], "CS": [...]}
-    ("delivered_ids",    {"MCC": set(), "CS": set()}),  # sets of delivered case IDs
-    ("batch_fetch_ok",   False),       # True once fetched successfully
+    ("batch_history",    None),
+    ("delivered_ids",    {"MCC": set(), "CS": set()}),
+    ("batch_fetch_ok",   False),
 ]:
     if k not in st.session_state:
         st.session_state[k] = v
@@ -188,6 +192,96 @@ def batch_history_summary(region):
     )
     total_delivered = sum(b.get("total_cases", 0) for b in batches)
     return batches, total_delivered
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# XLSX FETCH — download from GitHub latam-dashboard repo
+# Repo:  Jesus-Ameneiro/latam-dashboard
+# File:  data/LATAM_Internal_Case_Revision.xlsx
+# The Apps Script pushes a fresh copy every hour (03:00–23:59 Bogotá).
+# The dashboard fetches on startup and on manual Refresh.
+# ─────────────────────────────────────────────────────────────────────────────
+_XLSX_REPO = "Jesus-Ameneiro/latam-dashboard"
+_XLSX_PATH = "data/LATAM_Internal_Case_Revision.xlsx"
+
+def fetch_xlsx_from_github(force=False):
+    """
+    Download the xlsx from GitHub and call load_xlsx().
+    - On first load (xlsx_fetch_ok=False): always fetch.
+    - On Refresh (force=True): always fetch.
+    - Checks SHA: skips re-parse if file hasn't changed since last fetch.
+    Returns True on success, False on any error.
+    """
+    token = st.secrets.get("GITHUB_TOKEN", "")
+    repo  = st.secrets.get("GITHUB_XLSX_REPO", _XLSX_REPO)
+    path  = st.secrets.get("GITHUB_XLSX_PATH", _XLSX_PATH)
+
+    if not token:
+        st.session_state.xlsx_fetch_err = "GITHUB_TOKEN not set in Streamlit secrets."
+        return False
+
+    # ── Step 1: get file metadata (SHA + download_url) ────────────────────────
+    meta_url = f"https://api.github.com/repos/{repo}/contents/{path}"
+    headers  = {
+        "Authorization": f"token {token}",
+        "Accept":        "application/vnd.github.v3+json",
+        "User-Agent":    "Ruvixx-Dashboard",
+    }
+    try:
+        meta_resp = requests.get(meta_url, headers=headers, timeout=20)
+        if meta_resp.status_code == 404:
+            st.session_state.xlsx_fetch_err = (
+                f"File not found: {repo}/{path}. "
+                "Run setupHourlyTrigger() in Apps Script to start pushing the file.")
+            return False
+        if meta_resp.status_code != 200:
+            st.session_state.xlsx_fetch_err = (
+                f"GitHub API error {meta_resp.status_code} fetching xlsx metadata.")
+            return False
+        meta = meta_resp.json()
+    except Exception as e:
+        st.session_state.xlsx_fetch_err = f"Network error fetching xlsx: {e}"
+        return False
+
+    current_sha  = meta.get("sha", "")
+    download_url = meta.get("download_url", "")
+
+    # ── Step 2: skip download if SHA unchanged (unless force=True) ────────────
+    if (not force
+            and st.session_state.xlsx_fetch_ok
+            and current_sha == st.session_state.xlsx_last_sha):
+        # File unchanged — no need to re-parse
+        return True
+
+    # ── Step 3: download raw binary via download_url ──────────────────────────
+    if not download_url:
+        st.session_state.xlsx_fetch_err = "No download_url in GitHub API response."
+        return False
+
+    try:
+        dl_resp = requests.get(
+            download_url,
+            headers={"Authorization": f"token {token}", "User-Agent": "Ruvixx-Dashboard"},
+            timeout=60,
+        )
+        if dl_resp.status_code != 200:
+            st.session_state.xlsx_fetch_err = (
+                f"Failed to download xlsx: HTTP {dl_resp.status_code}")
+            return False
+        xlsx_bytes = dl_resp.content
+    except Exception as e:
+        st.session_state.xlsx_fetch_err = f"Network error downloading xlsx: {e}"
+        return False
+
+    # ── Step 4: parse with load_xlsx ──────────────────────────────────────────
+    file_obj = io.BytesIO(xlsx_bytes)
+    ok = load_xlsx(file_obj)
+    if ok:
+        st.session_state.xlsx_fetch_ok  = True
+        st.session_state.xlsx_last_sha  = current_sha
+        st.session_state.xlsx_fetch_ts  = datetime.now().strftime("%b %d, %H:%M")
+        st.session_state.xlsx_fetch_err = None
+    return ok
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -777,7 +871,15 @@ with ct:
 st.markdown(f'<hr style="border-color:{BORD}">', unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CONTROLS  —  FILE UPLOAD  +  VIEW SELECTOR
+# AUTO-FETCH ON STARTUP — both xlsx and batch history
+# ─────────────────────────────────────────────────────────────────────────────
+if not st.session_state.xlsx_fetch_ok:
+    with st.spinner("Loading data from GitHub…"):
+        fetch_xlsx_from_github(force=False)
+        fetch_batch_history()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONTROLS  —  REFRESH  +  VIEW SELECTOR
 # ─────────────────────────────────────────────────────────────────────────────
 all_weeks = st.session_state.all_weeks
 cur_idx   = st.session_state.current_week_idx
@@ -786,23 +888,20 @@ view      = st.session_state.view
 has_weeks = bool(all_weeks)
 has_prev  = has_weeks and (prev_idx != cur_idx)
 
-c_up, c_week, c_fm, c_msel, c_st = st.columns([2.3, 2.2, 1.3, 1.9, 2.1])
+c_ref, c_week, c_fm, c_msel, c_st = st.columns([1.4, 2.3, 1.3, 1.9, 2.9])
 
-with c_up:
-    uploaded = st.file_uploader(
-        "xlsx", type=["xlsx"], label_visibility="collapsed",
-        help="Upload the LATAM Internal Case Revision Excel file",
-        key="xlsx_upload",
-    )
-    if uploaded is not None and uploaded.name != st.session_state.file_name:
-        if load_xlsx(uploaded):
-            st.session_state.file_name = uploaded.name
+with c_ref:
+    if st.button("🔄 Refresh", key="btn_refresh",
+                 type="secondary", use_container_width=True,
+                 help="Re-fetch xlsx and batch history from GitHub"):
+        with st.spinner("Refreshing…"):
+            ok_x = fetch_xlsx_from_github(force=True)
+            ok_b = fetch_batch_history()
+        if ok_x:
+            st.toast("✅ Data refreshed from GitHub", icon="📊")
             st.rerun()
-    if st.session_state.file_name:
-        st.markdown(
-            f'<div style="font-size:10px;color:{TX2};margin-top:2px">'
-            f'📄 {st.session_state.file_name}</div>',
-            unsafe_allow_html=True)
+        else:
+            st.error(st.session_state.xlsx_fetch_err or "Refresh failed.")
 
 # ── Week selector dropdown (Current / Previous) ──────────────────────────────
 with c_week:
@@ -840,7 +939,7 @@ with c_week:
     else:
         st.markdown(
             f'<div style="font-size:11px;color:{TX2};padding-top:8px">'
-            f'Upload a file to see weeks</div>', unsafe_allow_html=True)
+            f'Waiting for data…</div>', unsafe_allow_html=True)
 
 # ── Full Month toggle ─────────────────────────────────────────────────────────
 with c_fm:
@@ -899,43 +998,51 @@ with c_msel:
 
 with c_st:
     if not has_weeks:
-        st.markdown(
-            f'<div style="font-size:11px;color:{ORG};padding-top:8px">'
-            f'⬆️ Upload an XLSX file to begin</div>', unsafe_allow_html=True)
+        _err = st.session_state.xlsx_fetch_err
+        if _err:
+            st.markdown(
+                f'<div style="font-size:11px;color:{RED};padding-top:4px;line-height:1.6">'
+                f'⚠️ {_err}</div>', unsafe_allow_html=True)
+        else:
+            st.markdown(
+                f'<div style="font-size:11px;color:{TX2};padding-top:8px">'
+                f'⏳ Loading data from GitHub…</div>', unsafe_allow_html=True)
     else:
         df_all = pd.DataFrame(st.session_state.all_cases)
         nm = len(df_all[df_all["region"]=="MCC"]) if not df_all.empty else 0
         nc = len(df_all[df_all["region"]=="CS"])  if not df_all.empty else 0
-        _bh_status = (
-            f'<span style="color:{GRN}">📦 Batch history loaded</span>'
-            if st.session_state.batch_fetch_ok
-            else f'<span style="color:{TX2}">📦 Batch history unavailable</span>'
-        )
+        _ts   = st.session_state.xlsx_fetch_ts or "—"
+        _bh   = (f'<span style="color:{GRN}">📦 Batch history loaded</span>'
+                 if st.session_state.batch_fetch_ok
+                 else f'<span style="color:{TX2}">📦 No batch history</span>')
+        _err  = st.session_state.xlsx_fetch_err
+        _warn = (f'<br><span style="color:{RED};font-size:10px">⚠️ {_err}</span>'
+                 if _err else "")
         st.markdown(
-            f'<div style="font-size:11px;color:{TX2};padding-top:4px;line-height:1.7">'
-            f'<span style="color:{GRN}">● Loaded</span> · '
-            f'{len(st.session_state.all_cases)} cases · {len(all_weeks)} wks<br>'
-            f'MCC <b style="color:{ORG}">{nm}</b> · CS <b style="color:{ORG}">{nc}</b><br>'
-            f'{_bh_status}'
+            f'<div style="font-size:11px;color:{TX2};padding-top:2px;line-height:1.7">'
+            f'<span style="color:{GRN}">● GitHub</span> · fetched {_ts}<br>'
+            f'{len(st.session_state.all_cases)} cases · {len(all_weeks)} wks &nbsp;'
+            f'MCC <b style="color:{ORG}">{nm}</b> CS <b style="color:{ORG}">{nc}</b><br>'
+            f'{_bh}{_warn}'
             f'</div>', unsafe_allow_html=True)
 
 # ── Empty state ──────────────────────────────────────────────────────────────
 if not has_weeks:
+    _err = st.session_state.xlsx_fetch_err
     st.markdown(
         f'<div style="text-align:center;padding:80px 20px">'
         f'<div style="font-size:48px;margin-bottom:16px">📊</div>'
         f'<div style="font-size:18px;font-weight:600;color:{TX};margin-bottom:8px">'
         f'No data loaded</div>'
-        f'<div style="font-size:13px;color:{TX2}">Upload the Ruvixx LATAM Internal '
-        f'Case Revision Excel file above to get started.</div></div>',
+        f'<div style="font-size:13px;color:{TX2};margin-bottom:12px">'
+        f'The dashboard fetches data automatically from GitHub.<br>'
+        f'Make sure <code>GITHUB_TOKEN</code> is set in Streamlit secrets.</div>'
+        + (f'<div style="font-size:12px;color:{RED};background:#FEE2E2;'
+           f'border-radius:8px;padding:8px 14px;display:inline-block">'
+           f'⚠️ {_err}</div>' if _err else "")
+        + f'</div>',
         unsafe_allow_html=True)
     st.stop()
-
-# ── Auto-fetch batch history from GitHub (once per session) ──────────────────
-# Fetches from Jesus-Ameneiro/prebatch-delivery/batch_history.json on first load.
-# Requires GITHUB_TOKEN in Streamlit secrets.
-if not st.session_state.batch_fetch_ok:
-    fetch_batch_history()  # silent — errors don't block the dashboard
 
 # ─────────────────────────────────────────────────────────────────────────────
 # COMPUTE

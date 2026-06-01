@@ -570,27 +570,66 @@ def load_xlsx(file_obj):
     all_cases   = []
     seen_keys   = set()
 
+    # First pass: infer the correct year for each month sheet from actual case dates.
+    # This prevents year misassignment when the file spans a year boundary
+    # (e.g. a "January" sheet used in a new year would wrongly get last year).
+    sheet_years = {}
+    for sname in wb.sheetnames:
+        slo = sname.strip().lower()
+        if slo.startswith("summary") or not MONTH_MAP.get(slo):
+            continue
+        ws   = wb[sname]
+        rows = list(ws.iter_rows(values_only=True))
+        if not rows:
+            continue
+        dps = [i for i, v in enumerate(list(rows[0])) if str(v or "").strip() == "Date"]
+        for dp in dps:
+            for raw_row in rows[1:]:
+                row = list(raw_row)
+                if dp >= len(row):
+                    continue
+                ds = parse_date_val(row[dp])
+                if ds:
+                    # Use the year from the first valid date found in this sheet
+                    sheet_years[slo] = int(ds[:4])
+                    break
+            if slo in sheet_years:
+                break
+
+    def _year_for(month_name, month_num):
+        """Return the correct year for a sheet: from date data if available,
+        else today's year adjusted for month proximity."""
+        if month_name in sheet_years:
+            return sheet_years[month_name]
+        # For empty sheets (e.g. June with no data yet), infer from adjacent months
+        for offset in range(1, 12):
+            prev_mn = ((month_num - 1 - offset) % 12) + 1
+            prev_name = [k for k, v in MONTH_MAP.items() if v == prev_mn]
+            if prev_name and prev_name[0] in sheet_years:
+                return sheet_years[prev_name[0]]
+        return year  # final fallback
+
     for sname in wb.sheetnames:
         slo = sname.strip().lower()
 
         if slo.startswith("summary"):
-            # e.g. "Summary-May" → month part = "may"
             month_part = slo.split("-", 1)[1].strip() if "-" in slo else ""
             month_num  = MONTH_MAP.get(month_part)
             if month_num is None:
                 continue
-            month_key = f"{year}-{month_num:02d}"
+            sheet_year = _year_for(month_part, month_num)
+            month_key  = f"{sheet_year}-{month_num:02d}"
             try:
-                weeks = parse_summary_sheet(wb, sname, month_key, year)
+                weeks = parse_summary_sheet(wb, sname, month_key, sheet_year)
                 all_weeks.extend(weeks)
             except Exception as ex:
                 st.warning(f"⚠ Could not parse {sname}: {ex}")
         else:
-            # Plain month sheet e.g. "May", "April"
             month_num = MONTH_MAP.get(slo)
             if month_num is None:
                 continue
-            month_key = f"{year}-{month_num:02d}"
+            sheet_year = _year_for(slo, month_num)
+            month_key  = f"{sheet_year}-{month_num:02d}"
             try:
                 cases = parse_data_sheet(wb, sname, month_key)
                 for c in cases:

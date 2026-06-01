@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime, date, timedelta
-import re, copy, base64, io
+import re, copy, io
 from openpyxl import load_workbook
 import requests
 
@@ -96,7 +96,6 @@ for k, v in [
     ("delivered_ids",    {"MCC": set(), "CS": set()}),
     ("batch_fetch_ok",   False),
     # ── UI sync ───────────────────────────────────────────────────────────────
-    ("_reset_wk_dropdown", False),  # set True when an external event resets view→"current"
 ]:
     if k not in st.session_state:
         st.session_state[k] = v
@@ -118,12 +117,7 @@ PLT  = "plotly_dark" if dark else "plotly_white"
 ABSC = "#44403C" if dark else "#FEE2CC"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# BATCH HISTORY — fetch from GitHub prebatch-delivery repo
-# Repo:  Jesus-Ameneiro/prebatch-delivery
-# File:  batch_history.json
-# Struct: {"MCC":[{batch_number,delivery_date,region,profile,total_cases,
-#                  cases:[[case_id,name],...]},...], "CS":[...]}
-# Case IDs may be compound: "4514228#1,4475779#1" → split on comma.
+# BATCH HISTORY — GitHub prebatch-delivery / batch_history.json
 # ─────────────────────────────────────────────────────────────────────────────
 _BATCH_REPO = "Jesus-Ameneiro/prebatch-delivery"
 _BATCH_PATH = "batch_history.json"
@@ -196,23 +190,13 @@ def batch_history_summary(region):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# XLSX FETCH — download from GitHub latam-dashboard repo
-# Repo:  Jesus-Ameneiro/latam-dashboard
-# File:  data/LATAM_Internal_Case_Revision.xlsx
-# The Apps Script pushes a fresh copy every hour (03:00–23:59 Bogotá).
-# The dashboard fetches on startup and on manual Refresh.
+# XLSX FETCH — GitHub latam-dashboard repo (hourly push via Apps Script)
 # ─────────────────────────────────────────────────────────────────────────────
 _XLSX_REPO = "Jesus-Ameneiro/latam-dashboard"
 _XLSX_PATH = "data/LATAM_Internal_Case_Revision.xlsx"
 
 def fetch_xlsx_from_github(force=False):
-    """
-    Download the xlsx from GitHub and call load_xlsx().
-    - On first load (xlsx_fetch_ok=False): always fetch.
-    - On Refresh (force=True): always fetch.
-    - Checks SHA: skips re-parse if file hasn't changed since last fetch.
-    Returns True on success, False on any error.
-    """
+    """Download xlsx from GitHub, parse it, update session state."""
     token = st.secrets.get("GITHUB_TOKEN", "")
     repo  = st.secrets.get("GITHUB_XLSX_REPO", _XLSX_REPO)
     path  = st.secrets.get("GITHUB_XLSX_PATH", _XLSX_PATH)
@@ -221,7 +205,6 @@ def fetch_xlsx_from_github(force=False):
         st.session_state.xlsx_fetch_err = "GITHUB_TOKEN not set in Streamlit secrets."
         return False
 
-    # ── Step 1: get file metadata (SHA + download_url) ────────────────────────
     meta_url = f"https://api.github.com/repos/{repo}/contents/{path}"
     headers  = {
         "Authorization": f"token {token}",
@@ -247,14 +230,12 @@ def fetch_xlsx_from_github(force=False):
     current_sha  = meta.get("sha", "")
     download_url = meta.get("download_url", "")
 
-    # ── Step 2: skip download if SHA unchanged (unless force=True) ────────────
     if (not force
             and st.session_state.xlsx_fetch_ok
             and current_sha == st.session_state.xlsx_last_sha):
         # File unchanged — no need to re-parse
         return True
 
-    # ── Step 3: download raw binary via download_url ──────────────────────────
     if not download_url:
         st.session_state.xlsx_fetch_err = "No download_url in GitHub API response."
         return False
@@ -274,7 +255,6 @@ def fetch_xlsx_from_github(force=False):
         st.session_state.xlsx_fetch_err = f"Network error downloading xlsx: {e}"
         return False
 
-    # ── Step 4: parse with load_xlsx ──────────────────────────────────────────
     file_obj = io.BytesIO(xlsx_bytes)
     ok = load_xlsx(file_obj)
     if ok:
@@ -392,10 +372,7 @@ def _dates_from_range(dr_str, year):
     return None, None
 
 def _calc_week_dates(year, month, week_num):
-    """Calculate Mon–Fri of the Nth work week of a calendar month.
-    Week 1 = the week whose Monday is the first Monday on or after the 1st.
-    Verified: May 2026 W1=May 4-8, W2=May 11-15, W3=May 18-22, W4=May 25-29.
-    """
+    """Mon–Fri of the Nth work week of a calendar month."""
     try:
         first       = date(year, month, 1)
         wd          = first.weekday()                  # 0=Mon … 6=Sun
@@ -439,7 +416,6 @@ def parse_summary_sheet(wb, sheet_name, month_key, year):
         if not any(v is not None for v in row):
             continue
 
-        # ── Week header (col A) ─────────────────────────────────────────────
         if row[0] is not None:
             wn, dr = _week_header(row[0])
             if wn is not None:
@@ -461,13 +437,11 @@ def parse_summary_sheet(wb, sheet_name, month_key, year):
         if cur is None:
             continue
 
-        # ── "Meta del Batch:" starts data collection ─────────────────────────
         if str(row[1] or "").strip() == "Meta del Batch:":
             mcc_on = True
         if str(row[7] or "").strip() == "Meta del Batch:":
             cs_on = True
 
-        # ── MCC side (cols 1-5) ──────────────────────────────────────────────
         if mcc_on and not mcc_done:
             lbl4 = str(row[4] or "").strip()
             if lbl4 == "Target Batch":
@@ -486,7 +460,6 @@ def parse_summary_sheet(wb, sheet_name, month_key, year):
                     except Exception:
                         pass
 
-        # ── CS side (cols 7-11) ─────────────────────────────────────────────
         if cs_on and not cs_done:
             lbl10 = str(row[10] or "").strip()
             if lbl10 == "Target Batch":
@@ -511,26 +484,7 @@ def parse_summary_sheet(wb, sheet_name, month_key, year):
 
 
 def parse_data_sheet(wb, sheet_name, month_key):
-    """
-    Parse one data sheet (e.g. 'May').
-
-    Column groups confirmed from file analysis:
-      Header: [None, Date, CaseID, CaseName, Country, Investigator, QANotes, QA'd,
-               None, Date, CaseID, ...] repeating every 8 cols offset by 9.
-      Date positions: [1, 9, 17, 25, 33, 41, 49, 57]
-
-    Groups alternate MCC / CS by index:
-      group index 0 (dp=1)  → Week 1 MCC
-      group index 1 (dp=9)  → Week 1 CS
-      group index 2 (dp=17) → Week 2 MCC
-      group index 3 (dp=25) → Week 2 CS  … etc.
-
-    Week assignment is by column POSITION, not by date.
-    Verified: group 0 = exactly 120 cases, matching Summary Week 1 MCC total.
-
-    Returns list of case dicts:
-      { date, case_id, country, investigator, week_num, region, month_key }
-    """
+    """Parse one data sheet. Week assigned by column group position (not date). Returns case dicts."""
     ws = wb[sheet_name]
     rows = list(ws.iter_rows(values_only=True))
     if not rows:
@@ -604,13 +558,7 @@ def parse_data_sheet(wb, sheet_name, month_key):
 
 
 def load_xlsx(file_obj):
-    """
-    Load the uploaded workbook. Populates:
-      st.session_state.all_weeks    – list of week dicts (all months, sorted)
-      st.session_state.all_cases    – deduplicated case dicts
-      st.session_state.current_week_idx / prev_week_idx
-      st.session_state.rcfg         – updated from current week's Summary groups
-    """
+    """Parse xlsx workbook and populate all_weeks, all_cases, rcfg in session state."""
     try:
         wb = load_workbook(file_obj, data_only=True, read_only=True)
     except Exception as e:
@@ -674,25 +622,54 @@ def load_xlsx(file_obj):
                 w["end"]   = e
                 w["label"] = f"Week {w['week_num']} · {fmt_date_range(s, e)}"
 
-    # Determine current week: find the week whose Mon-Fri span contains today.
-    # Because all weeks now have calendar-correct start/end, each non-overlapping
-    # Mon-Fri range will match at most one week.
+    # Build a set of (week_num, month_key) pairs that have actual case data.
+    # This is the ground truth for which weeks are "real" to the user.
+    weeks_with_data = set(
+        (c["week_num"], c["month_key"]) for c in all_cases
+    )
+
     today_str = date.today().strftime("%Y-%m-%d")
     cur_idx   = None
+
+    # Priority 1: a week whose calendar window contains today AND has data
     for i, w in enumerate(all_weeks):
         if w.get("start") and w.get("end"):
             if w["start"] <= today_str <= w["end"]:
-                cur_idx = i
-                break
+                if (w["week_num"], w["month_key"]) in weeks_with_data:
+                    cur_idx = i
+                    break
 
+    # Priority 2: today is inside a week but that week has no data yet —
+    # use the most recent past week that DOES have data
     if cur_idx is None:
-        # Today is not inside any week (e.g. file only covers past months).
-        # Use the most recent past week.
-        past = [i for i, w in enumerate(all_weeks)
-                if w.get("end") and w["end"] < today_str]
-        cur_idx = past[-1] if past else max(0, len(all_weeks) - 1)
+        filled_past = [
+            i for i, w in enumerate(all_weeks)
+            if (w["week_num"], w["month_key"]) in weeks_with_data
+            and w.get("end") and w["end"] <= today_str
+        ]
+        if filled_past:
+            cur_idx = filled_past[-1]
 
-    prev_idx = max(0, cur_idx - 1)
+    # Priority 3: no past week has data (file is brand new) — use today's
+    # calendar week even if empty, so the UI is not stuck
+    if cur_idx is None:
+        for i, w in enumerate(all_weeks):
+            if w.get("start") and w.get("end"):
+                if w["start"] <= today_str <= w["end"]:
+                    cur_idx = i
+                    break
+
+    # Final fallback: last week in the list
+    if cur_idx is None:
+        cur_idx = max(0, len(all_weeks) - 1)
+
+    # prev_idx: the most recent week before cur_idx that has data
+    # (skip empty Summary-only weeks between the two)
+    prev_filled = [
+        i for i in range(cur_idx)
+        if (all_weeks[i]["week_num"], all_weeks[i]["month_key"]) in weeks_with_data
+    ]
+    prev_idx = prev_filled[-1] if prev_filled else cur_idx
 
     # Update session state
     st.session_state.all_weeks        = all_weeks
@@ -700,7 +677,6 @@ def load_xlsx(file_obj):
     st.session_state.current_week_idx = cur_idx
     st.session_state.prev_week_idx    = prev_idx
     st.session_state.view             = "current"
-    st.session_state._reset_wk_dropdown = True   # force dropdown to "current" after reload
 
     # Rebuild rcfg from current week's Summary so sidebar shows live data
     if all_weeks and cur_idx < len(all_weeks):
@@ -763,7 +739,7 @@ st.markdown(f"""
 with st.sidebar:
     st.markdown("## ⚙️ Country Configuration")
     st.caption("Changes apply instantly to all displayed data.")
-    if st.button("↩ Reset to defaults", use_container_width=True):
+    if st.button("↩ Reset to defaults", width='stretch'):
         st.session_state.rcfg = copy.deepcopy(DEFAULT_REGIONS); st.rerun()
     st.markdown("---")
     assigned   = get_all_assigned()
@@ -843,13 +819,13 @@ with cl:
 with cm:
     if st.button("México CC", key="btn_mcc",
                  type="primary" if st.session_state.tab == "MCC" else "secondary",
-                 use_container_width=True):
+                 width='stretch'):
         st.session_state.tab = "MCC"; st.rerun()
 
 with cs_:
     if st.button("Cono Sur", key="btn_cs",
                  type="primary" if st.session_state.tab == "CS" else "secondary",
-                 use_container_width=True):
+                 width='stretch'):
         st.session_state.tab = "CS"; st.rerun()
 
 with cr:
@@ -866,7 +842,7 @@ with cr:
     </div>""", unsafe_allow_html=True)
 
 with ct:
-    if st.button("🌙" if not dark else "☀️", key="theme_btn", use_container_width=True):
+    if st.button("🌙" if not dark else "☀️", key="theme_btn", width='stretch'):
         st.session_state.dark = not dark; st.rerun()
 
 st.markdown(f'<hr style="border-color:{BORD}">', unsafe_allow_html=True)
@@ -927,7 +903,7 @@ c_ref, c_cur, c_prev, c_st = st.columns([1.3, 2.1, 2.1, 3.2])
 
 with c_ref:
     if st.button("🔄 Refresh", key="btn_refresh",
-                 type="secondary", use_container_width=True,
+                 type="secondary", width='stretch',
                  help="Re-fetch xlsx and batch history from GitHub"):
         with st.spinner("Refreshing…"):
             ok_x = fetch_xlsx_from_github(force=True)
@@ -938,15 +914,13 @@ with c_ref:
         else:
             st.error(st.session_state.xlsx_fetch_err or "Refresh failed.")
 
-# ── Week buttons — same stateless pattern as MCC/CS region tabs ──────────────
-# st.button() is stateless: on click it sets session state and reruns.
-# No widget key persistence issues — the most reliable pattern in Streamlit.
+# ── Week buttons ─────────────────────────────────────────────────────────────
 with c_cur:
     if st.button(
         _cur_lbl,
         key="btn_week_cur",
         type="primary" if view == "current" else "secondary",
-        use_container_width=True,
+        width='stretch',
         disabled=not has_weeks,
     ):
         st.session_state.view = "current"
@@ -957,7 +931,7 @@ with c_prev:
         _prev_lbl,
         key="btn_week_prev",
         type="primary" if view == "prev" else "secondary",
-        use_container_width=True,
+        width='stretch',
         disabled=not has_prev,
     ):
         st.session_state.view = "prev"
@@ -1077,12 +1051,7 @@ sel_week = all_weeks[sel_idx]
 
 cur_month_key = sel_week["month_key"]
 
-month_weeks = [w for w in all_weeks if w["month_key"] == cur_month_key]
-
-# ── Calendar boundaries ───────────────────────────────────────────────────────
-# These are always derived from the calendar, never from the xlsx Summary header.
-# Summary headers may contain batch date ranges (e.g. "Apr 29-May 15") that
-# span multiple calendar weeks and would produce wrong filter windows.
+# Calendar boundaries for m_data (month total on investigator cards)
 import calendar as _cal
 _y, _m = int(cur_month_key[:4]), int(cur_month_key[5:])
 month_start_str = f"{_y}-{_m:02d}-01"
@@ -1107,12 +1076,7 @@ has_data = not cases_df.empty
 # STEP 1: column-position region tag (set during xlsx parsing by column group)
 r_data = cases_df[cases_df["region"] == tab].copy() if has_data else pd.DataFrame()
 
-# STEP 2: country-membership validation.
-# Use DEFAULT_REGIONS as the canonical country list for each region.
-# This is stable and never changes between weeks, preventing cases from being
-# dropped when the Summary groups use different labels across weeks.
-# We also include any additional countries found across all Summary groups
-# (handles countries added to a region after DEFAULT_REGIONS was last updated).
+# STEP 2: country filter — DEFAULT_REGIONS + any extra countries from Summary groups
 _default_ctrs = set(c for g in DEFAULT_REGIONS[tab]["groups"] for c in g["countries"])
 _rkey = "mcc" if tab == "MCC" else "cs"
 _extra_ctrs   = set(
@@ -1126,13 +1090,7 @@ region_countries = _default_ctrs | _extra_ctrs
 if not r_data.empty:
     r_data = r_data[r_data["country"].isin(region_countries)]
 
-# ── w_data: filter by batch-week assignment (column position in xlsx) ───────────
-# Cases are assigned to a batch week by their COLUMN GROUP position in the xlsx,
-# stored as week_num + month_key during parsing. This is the authoritative scope.
-# Filtering by calendar date excludes cases entered slightly before/after the
-# calendar Mon–Fri window (e.g. batch W4 work done on May 19–24, delivered May 27)
-# and would produce 0 results for valid historical weeks.
-# Full-month view uses calendar boundaries to stay within the selected month.
+# w_data: cases for this batch week (by column-group position, not calendar date)
 # Filter by batch week (column-group position in xlsx, not calendar date)
 w_data = r_data[
     (r_data["week_num"]  == sel_week["week_num"]) &
@@ -1206,31 +1164,15 @@ for g in summary_groups:
 # For full month: compute per-week breakdown for each investigator.
 # For week view: compute per-day breakdown within the calendar week.
 
-# Build a mapping of week_num → (start, end) for the current month
-_wk_ranges = {
-    w["week_num"]: (w["start"], w["end"])
-    for w in month_weeks
-    if w.get("start") and w.get("end")
-}
-
 invs = []
 if not w_data.empty:
     for inv_name, grp in sorted(w_data.groupby("investigator"),
                                 key=lambda x: -len(x[1])):
         month_total = (len(m_data[m_data["investigator"] == inv_name])
                        if not m_data.empty else 0)
-        by_day = grp.groupby("date").size().to_dict()
-
-        # Weekly breakdown for full-month view:
-        # For each week of the month, count dates within that week's calendar range
-        by_week = {}
-        for wn, (ws, we) in sorted(_wk_ranges.items()):
-            wk_count = len(grp[(grp["date"] >= ws) & (grp["date"] <= we)])
-            by_week[wn] = wk_count
-
         invs.append(dict(
             name=inv_name, total=len(grp), month_total=month_total,
-            by_day=by_day, by_week=by_week,
+            by_day=grp.groupby("date").size().to_dict(),
             support=(inv_name in cfg.get("support", [])),
         ))
 
@@ -1392,7 +1334,7 @@ with mc1:
         fig_g.update_layout(margin=dict(t=5,b=5,l=5,r=5), height=200,
                              paper_bgcolor="rgba(0,0,0,0)",
                              plot_bgcolor="rgba(0,0,0,0)")
-        st.plotly_chart(fig_g, use_container_width=True,
+        st.plotly_chart(fig_g, width='stretch',
                         config={"displayModeBar": False})
         q_lbl = "Weekly quota"
         _dn = f" · {total_deliv} prev batch" if has_batch_data and total_deliv > 0 else ""
@@ -1478,9 +1420,8 @@ st.markdown(f"""
     click card to expand ↓</span>
 </div>""", unsafe_allow_html=True)
 
-n_weeks = 1
-w_min   = cfg["weekly_min"]   * n_weeks
-w_ideal = cfg["weekly_ideal"] * n_weeks
+w_min   = cfg["weekly_min"]
+w_ideal = cfg["weekly_ideal"]
 month_str = datetime.strptime(cur_month_key, "%Y-%m").strftime("%B %Y")
 
 
@@ -1595,7 +1536,7 @@ else:
                         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                         template=PLT, xaxis=dict(showgrid=False),
                         yaxis=dict(showgrid=True))
-                    st.plotly_chart(fig_d, use_container_width=True,
+                    st.plotly_chart(fig_d, width='stretch',
                                     config={"displayModeBar": False},
                                     key=f"d_{idx}_{tab}_{view}")
                 with ex2:
@@ -1616,7 +1557,7 @@ else:
                                 paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                                 template=PLT, xaxis=dict(showgrid=True),
                                 yaxis=dict(showgrid=False))
-                            st.plotly_chart(fig_c, use_container_width=True,
+                            st.plotly_chart(fig_c, width='stretch',
                                             config={"displayModeBar": False},
                                             key=f"c_{idx}_{tab}_{view}")
                 # Month breakdown (only in week views)
@@ -1639,7 +1580,7 @@ else:
                             paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                             template=PLT, xaxis=dict(showgrid=False, tickangle=-45),
                             yaxis=dict(showgrid=True))
-                        st.plotly_chart(fig_m, use_container_width=True,
+                        st.plotly_chart(fig_m, width='stretch',
                                         config={"displayModeBar": False},
                                         key=f"m_{idx}_{tab}_{view}")
 
@@ -1679,7 +1620,7 @@ with st.container(border=True):
         xaxis=dict(showgrid=False),
         yaxis=dict(showgrid=True, gridcolor="rgba(249,115,22,0.1)"))
 
-    st.plotly_chart(fig_l, use_container_width=True, config={"displayModeBar": False})
+    st.plotly_chart(fig_l, width='stretch', config={"displayModeBar": False})
 
 st.markdown("<br>", unsafe_allow_html=True)
 
@@ -1708,7 +1649,7 @@ with bc1:
                 template=PLT,
                 xaxis=dict(showgrid=True, gridcolor="rgba(249,115,22,0.1)"),
                 yaxis=dict(showgrid=False, autorange="reversed"))
-            st.plotly_chart(fig_c, use_container_width=True,
+            st.plotly_chart(fig_c, width='stretch',
                             config={"displayModeBar": False})
         else:
             st.markdown(_no_data(), unsafe_allow_html=True)
@@ -1731,7 +1672,7 @@ with bc2:
                 template=PLT,
                 xaxis=dict(showgrid=True, gridcolor="rgba(249,115,22,0.1)"),
                 yaxis=dict(showgrid=False, autorange="reversed"))
-            st.plotly_chart(fig_i, use_container_width=True,
+            st.plotly_chart(fig_i, width='stretch',
                             config={"displayModeBar": False})
         else:
             st.markdown(_no_data(), unsafe_allow_html=True)

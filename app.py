@@ -844,6 +844,11 @@ cfg   = st.session_state.rcfg[st.session_state.tab]
 pills = region_pills(st.session_state.tab)
 cl, cm, cs_, cr, ct = st.columns([1.4, 1, 1, 4.5, 0.5])
 
+# on_click callbacks — run BEFORE the script re-executes, so session state
+# is correct from the very first line of the next render.
+def _set_mcc():  st.session_state.tab = "MCC"
+def _set_cs():   st.session_state.tab = "CS"
+
 with cl:
     st.markdown(f"""
     <div style="display:flex;align-items:center;gap:8px;padding:5px 0">
@@ -856,16 +861,14 @@ with cl:
     </div>""", unsafe_allow_html=True)
 
 with cm:
-    if st.button("México CC", key="btn_mcc",
-                 type="primary" if st.session_state.tab == "MCC" else "secondary",
-                 use_container_width=True):
-        st.session_state.tab = "MCC"; st.rerun()
+    st.button("México CC", key="btn_mcc",
+              type="primary" if st.session_state.tab == "MCC" else "secondary",
+              use_container_width=True, on_click=_set_mcc)
 
 with cs_:
-    if st.button("Cono Sur", key="btn_cs",
-                 type="primary" if st.session_state.tab == "CS" else "secondary",
-                 use_container_width=True):
-        st.session_state.tab = "CS"; st.rerun()
+    st.button("Cono Sur", key="btn_cs",
+              type="primary" if st.session_state.tab == "CS" else "secondary",
+              use_container_width=True, on_click=_set_cs)
 
 with cr:
     ph = "".join(
@@ -881,8 +884,9 @@ with cr:
     </div>""", unsafe_allow_html=True)
 
 with ct:
-    if st.button("🌙" if not dark else "☀️", key="theme_btn", use_container_width=True):
-        st.session_state.dark = not dark; st.rerun()
+    def _toggle_theme(): st.session_state.dark = not st.session_state.dark
+    st.button("🌙" if not dark else "☀️", key="theme_btn",
+              use_container_width=True, on_click=_toggle_theme)
 
 st.markdown(f'<hr style="border-color:{BORD}">', unsafe_allow_html=True)
 
@@ -954,27 +958,28 @@ with c_ref:
             st.error(st.session_state.xlsx_fetch_err or "Refresh failed.")
 
 # ── Week buttons ─────────────────────────────────────────────────────────────
+def _set_current(): st.session_state.view = "current"
+def _set_prev():    st.session_state.view = "prev"
+
 with c_cur:
-    if st.button(
+    st.button(
         _cur_lbl,
         key="btn_week_cur",
         type="primary" if view == "current" else "secondary",
         use_container_width=True,
         disabled=not has_weeks,
-    ):
-        st.session_state.view = "current"
-        st.rerun()
+        on_click=_set_current,
+    )
 
 with c_prev:
-    if st.button(
+    st.button(
         _prev_lbl,
         key="btn_week_prev",
         type="primary" if view == "prev" else "secondary",
         use_container_width=True,
         disabled=not has_prev,
-    ):
-        st.session_state.view = "prev"
-        st.rerun()
+        on_click=_set_prev,
+    )
 
 with c_st:
     if not has_weeks:

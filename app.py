@@ -778,7 +778,7 @@ st.markdown(f"""
 with st.sidebar:
     st.markdown("## ⚙️ Country Configuration")
     st.caption("Changes apply instantly to all displayed data.")
-    if st.button("↩ Reset to defaults", width='stretch'):
+    if st.button("↩ Reset to defaults", use_container_width=True):
         st.session_state.rcfg = copy.deepcopy(DEFAULT_REGIONS); st.rerun()
     st.markdown("---")
     assigned   = get_all_assigned()
@@ -858,13 +858,13 @@ with cl:
 with cm:
     if st.button("México CC", key="btn_mcc",
                  type="primary" if st.session_state.tab == "MCC" else "secondary",
-                 width='stretch'):
+                 use_container_width=True):
         st.session_state.tab = "MCC"; st.rerun()
 
 with cs_:
     if st.button("Cono Sur", key="btn_cs",
                  type="primary" if st.session_state.tab == "CS" else "secondary",
-                 width='stretch'):
+                 use_container_width=True):
         st.session_state.tab = "CS"; st.rerun()
 
 with cr:
@@ -881,7 +881,7 @@ with cr:
     </div>""", unsafe_allow_html=True)
 
 with ct:
-    if st.button("🌙" if not dark else "☀️", key="theme_btn", width='stretch'):
+    if st.button("🌙" if not dark else "☀️", key="theme_btn", use_container_width=True):
         st.session_state.dark = not dark; st.rerun()
 
 st.markdown(f'<hr style="border-color:{BORD}">', unsafe_allow_html=True)
@@ -942,7 +942,7 @@ c_ref, c_cur, c_prev, c_st = st.columns([1.3, 2.1, 2.1, 3.2])
 
 with c_ref:
     if st.button("🔄 Refresh", key="btn_refresh",
-                 type="secondary", width='stretch',
+                 type="secondary", use_container_width=True,
                  help="Re-fetch xlsx and batch history from GitHub"):
         with st.spinner("Refreshing…"):
             ok_x = fetch_xlsx_from_github(force=True)
@@ -959,7 +959,7 @@ with c_cur:
         _cur_lbl,
         key="btn_week_cur",
         type="primary" if view == "current" else "secondary",
-        width='stretch',
+        use_container_width=True,
         disabled=not has_weeks,
     ):
         st.session_state.view = "current"
@@ -970,7 +970,7 @@ with c_prev:
         _prev_lbl,
         key="btn_week_prev",
         type="primary" if view == "prev" else "secondary",
-        width='stretch',
+        use_container_width=True,
         disabled=not has_prev,
     ):
         st.session_state.view = "prev"
@@ -1224,11 +1224,17 @@ by_inv_stat = [dict(name=i["name"], total=i["total"],
                     support=i["support"])
                for i in invs]
 
-# ── w_days: Mon–Fri work days with per-day case counts ───────────────────────
+# ── w_days: ALWAYS exactly Mon–Fri of the selected calendar week ─────────────
+# Using actual case date range caused 700+ day spans due to:
+#   • typo dates (e.g. 2029-05-29 instead of 2026-05-29)
+#   • batch cases entered weeks before the calendar deadline
+# The weekly total already includes ALL batch-week cases (week_num filter).
+# Daily bars show only cases dated within the 5-day calendar window.
+# Cases outside that window still count toward the week total but not the bars.
 _DAY = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]
 
 def _build_w_days(start_str, end_str):
-    """Mon–Fri days between start and end (inclusive), with per-day case counts."""
+    """Exactly Mon–Fri between start and end, with per-day case counts from w_data."""
     days = []
     if not start_str or not end_str:
         return days
@@ -1243,13 +1249,7 @@ def _build_w_days(start_str, end_str):
         cur += timedelta(1)
     return days
 
-# Build from actual case dates so every worked day appears in the bars
-if not w_data.empty:
-    w_days = _build_w_days(w_data["date"].min(), w_data["date"].max())
-elif week_start_str and week_end_str:
-    w_days = _build_w_days(week_start_str, week_end_str)   # placeholder (no data yet)
-else:
-    w_days = []
+w_days = _build_w_days(week_start_str, week_end_str) if week_start_str and week_end_str else []
 
 # ─────────────────────────────────────────────────────────────────────────────
 # METRIC ROW

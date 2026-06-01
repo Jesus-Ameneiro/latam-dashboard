@@ -2,8 +2,9 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime, date, timedelta
-import re, copy
+import re, copy, base64
 from openpyxl import load_workbook
+import requests
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PAGE CONFIG
@@ -87,6 +88,10 @@ for k, v in [
     ("dark",             True),
     ("rcfg",             copy.deepcopy(DEFAULT_REGIONS)),
     ("_prev_dark",       None),
+    # ── Batch history (from prebatch-delivery GitHub repo) ────────────────────
+    ("batch_history",    None),        # raw JSON dict: {"MCC": [...], "CS": [...]}
+    ("delivered_ids",    {"MCC": set(), "CS": set()}),  # sets of delivered case IDs
+    ("batch_fetch_ok",   False),       # True once fetched successfully
 ]:
     if k not in st.session_state:
         st.session_state[k] = v
@@ -106,6 +111,84 @@ OL   = "#431407" if dark else "#FEF3EA"
 OB   = "#7C2D12" if dark else "#FED7AA"
 PLT  = "plotly_dark" if dark else "plotly_white"
 ABSC = "#44403C" if dark else "#FEE2CC"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BATCH HISTORY — fetch from GitHub prebatch-delivery repo
+# Repo:  Jesus-Ameneiro/prebatch-delivery
+# File:  batch_history.json
+# Struct: {"MCC":[{batch_number,delivery_date,region,profile,total_cases,
+#                  cases:[[case_id,name],...]},...], "CS":[...]}
+# Case IDs may be compound: "4514228#1,4475779#1" → split on comma.
+# ─────────────────────────────────────────────────────────────────────────────
+_BATCH_REPO = "Jesus-Ameneiro/prebatch-delivery"
+_BATCH_PATH = "batch_history.json"
+
+def fetch_batch_history():
+    """Fetch batch_history.json from GitHub and populate delivered_ids sets."""
+    token = st.secrets.get("GITHUB_TOKEN", "")
+    repo  = st.secrets.get("GITHUB_BATCH_REPO", _BATCH_REPO)
+    path  = st.secrets.get("GITHUB_BATCH_PATH", _BATCH_PATH)
+
+    if not token:
+        st.session_state.batch_fetch_ok = False
+        return False
+
+    url     = f"https://api.github.com/repos/{repo}/contents/{path}"
+    headers = {
+        "Authorization": f"token {token}",
+        "Accept":        "application/vnd.github.v3.raw",
+        "User-Agent":    "Ruvixx-Dashboard",
+    }
+    try:
+        resp = requests.get(url, headers=headers, timeout=20)
+        if resp.status_code != 200:
+            st.session_state.batch_fetch_ok = False
+            return False
+        data = resp.json()
+    except Exception:
+        st.session_state.batch_fetch_ok = False
+        return False
+
+    st.session_state.batch_history  = data
+    st.session_state.delivered_ids  = _build_delivered_set(data)
+    st.session_state.batch_fetch_ok = True
+    return True
+
+
+def _build_delivered_set(batch_data):
+    """
+    Build {region: set_of_case_ids} from the batch history JSON.
+    Handles compound case IDs (comma-separated) within a single entry.
+    """
+    delivered = {"MCC": set(), "CS": set()}
+    for region in ("MCC", "CS"):
+        for batch in batch_data.get(region, []):
+            for entry in batch.get("cases", []):
+                raw_id = str(entry[0] if entry else "").strip()
+                # Split compound IDs: "4514228#1,4475779#1" → ["4514228#1","4475779#1"]
+                for cid in re.split(r",\s*", raw_id):
+                    cid = cid.strip()
+                    if cid:
+                        delivered[region].add(cid)
+    return delivered
+
+
+def batch_history_summary(region):
+    """
+    Return a sorted list of batch dicts for display (newest first),
+    plus a total delivered count for the region.
+    """
+    bh = st.session_state.batch_history
+    if not bh:
+        return [], 0
+    batches = sorted(
+        bh.get(region, []),
+        key=lambda b: b.get("batch_number", 0),
+        reverse=True,
+    )
+    total_delivered = sum(b.get("total_cases", 0) for b in batches)
+    return batches, total_delivered
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # REGION HELPERS
@@ -823,11 +906,17 @@ with c_st:
         df_all = pd.DataFrame(st.session_state.all_cases)
         nm = len(df_all[df_all["region"]=="MCC"]) if not df_all.empty else 0
         nc = len(df_all[df_all["region"]=="CS"])  if not df_all.empty else 0
+        _bh_status = (
+            f'<span style="color:{GRN}">📦 Batch history loaded</span>'
+            if st.session_state.batch_fetch_ok
+            else f'<span style="color:{TX2}">📦 Batch history unavailable</span>'
+        )
         st.markdown(
             f'<div style="font-size:11px;color:{TX2};padding-top:4px;line-height:1.7">'
             f'<span style="color:{GRN}">● Loaded</span> · '
             f'{len(st.session_state.all_cases)} cases · {len(all_weeks)} wks<br>'
-            f'MCC <b style="color:{ORG}">{nm}</b> · CS <b style="color:{ORG}">{nc}</b>'
+            f'MCC <b style="color:{ORG}">{nm}</b> · CS <b style="color:{ORG}">{nc}</b><br>'
+            f'{_bh_status}'
             f'</div>', unsafe_allow_html=True)
 
 # ── Empty state ──────────────────────────────────────────────────────────────
@@ -841,6 +930,12 @@ if not has_weeks:
         f'Case Revision Excel file above to get started.</div></div>',
         unsafe_allow_html=True)
     st.stop()
+
+# ── Auto-fetch batch history from GitHub (once per session) ──────────────────
+# Fetches from Jesus-Ameneiro/prebatch-delivery/batch_history.json on first load.
+# Requires GITHUB_TOKEN in Streamlit secrets.
+if not st.session_state.batch_fetch_ok:
+    fetch_batch_history()  # silent — errors don't block the dashboard
 
 # ─────────────────────────────────────────────────────────────────────────────
 # COMPUTE
@@ -921,7 +1016,7 @@ m_data = r_data[
     (r_data["date"] <= month_end_str)
 ] if not r_data.empty else pd.DataFrame()
 
-# ── Summary quota data (authoritative from xlsx Summary sheet) ────────────────
+# ── Summary quota (target only — not used for generated count) ───────────────
 rkey = "mcc" if tab == "MCC" else "cs"
 
 if view_is_month:
@@ -931,27 +1026,54 @@ if view_is_month:
         for g in w[rkey]["groups"]:
             lbl = g["label"]
             if lbl not in grp_map:
-                grp_map[lbl] = dict(label=lbl, countries=g["countries"],
-                                    quota=0, generated=0)
-            grp_map[lbl]["quota"]     += g["quota"]
-            grp_map[lbl]["generated"] += g["generated"]
+                grp_map[lbl] = dict(label=lbl, countries=g["countries"], quota=0)
+            grp_map[lbl]["quota"] += g["quota"]
     summary_groups = list(grp_map.values())
     view_label = datetime.strptime(cur_month_key, "%Y-%m").strftime("%B %Y")
 else:
-    tq             = sel_week[rkey]["total"]
-    summary_groups = sel_week[rkey]["groups"]
-    view_label     = sel_week["label"]
+    tq = sel_week[rkey]["total"]
+    summary_groups = [
+        dict(label=g["label"], countries=g["countries"], quota=g["quota"])
+        for g in sel_week[rkey]["groups"]
+    ]
+    view_label = sel_week["label"]
 
-# Summary totals are authoritative for batch quota progress
-total = sum(g["generated"] for g in summary_groups)
+# ── Batch-history exclusion ───────────────────────────────────────────────────
+# delivered_ids: set of case IDs already shipped in a previous batch for this region.
+# new_w_data: valid cases in the current view that are NOT yet delivered.
+# These drive the batch progress metrics (donut, group breakdown, highlights).
+# Investigator cards use w_data (all valid cases — their full productivity).
+delivered_ids   = st.session_state.delivered_ids.get(tab, set())
+has_batch_data  = st.session_state.batch_fetch_ok
+
+new_w_data = (w_data[~w_data["case_id"].isin(delivered_ids)]
+              if not w_data.empty and delivered_ids
+              else w_data.copy())
+
+# ── Batch progress totals (data-sheet driven, batch-filtered) ─────────────────
+# total_new   = new cases not in any previous batch  → current batch progress
+# total_deliv = cases from the current view already in a previous batch
+# total_all   = all valid cases this period (investigator productivity)
+total_new   = len(new_w_data) if not new_w_data.empty else 0
+total_deliv = (len(w_data) - total_new) if not w_data.empty else 0
+total_all   = len(w_data) if not w_data.empty else 0
+
+# For the headline donut: progress = new cases / target quota
+total = total_new
 gap   = max(0, tq - total)
 pct   = round(total / tq * 100) if tq else 0
 
-groups = [
-    dict(label=g["label"], quota=g["quota"],
-         eff_quota=g["quota"], done=g["generated"])
-    for g in summary_groups
-]
+# ── Group breakdown: new cases per country group ──────────────────────────────
+groups = []
+for g in summary_groups:
+    g_countries = set(g["countries"])
+    if not new_w_data.empty:
+        g_new = len(new_w_data[new_w_data["country"].isin(g_countries)])
+    else:
+        g_new = 0
+    groups.append(dict(
+        label=g["label"], quota=g["quota"], eff_quota=g["quota"], done=g_new,
+    ))
 
 # ── Investigator stats from data sheet ───────────────────────────────────────
 # For full month: compute per-week breakdown for each investigator.
@@ -1042,26 +1164,78 @@ else:
 # METRIC ROW
 # ─────────────────────────────────────────────────────────────────────────────
 period_lbl = "Monthly quota" if view_is_month else "Weekly quota"
+
+# Build delivered-batch indicator (shown only when history is loaded)
+_deliv_tag = ""
+if has_batch_data and total_deliv > 0:
+    _deliv_tag = (f'<div style="font-size:9px;color:{TX2};margin-top:3px">'
+                  f'<span style="color:{GRN}">+{total_new} new</span>'
+                  f' · <span style="color:{TX2}">{total_deliv} prev batch</span></div>')
+elif has_batch_data:
+    _deliv_tag = (f'<div style="font-size:9px;color:{GRN};margin-top:3px">'
+                  f'All new · no overlap</div>')
+
 st.markdown(f"""
 <div style="display:flex;justify-content:flex-end;align-items:center;
             gap:28px;padding:8px 0 12px">
   <div style="text-align:center">
-    <div style="font-size:22px;font-weight:800;color:{ORG};line-height:1">{total}</div>
+    <div style="font-size:22px;font-weight:800;color:{ORG};line-height:1">{total_all}</div>
     <div style="font-size:9px;color:{TX2};text-transform:uppercase;letter-spacing:.06em">Cases Generated</div>
+    {_deliv_tag}
   </div>
   <div style="text-align:center">
     <div style="font-size:22px;font-weight:800;color:{ORG};line-height:1">{gap}</div>
-    <div style="font-size:9px;color:{TX2};text-transform:uppercase;letter-spacing:.06em">Quota Gap</div>
+    <div style="font-size:9px;color:{TX2};text-transform:uppercase;letter-spacing:.06em">Batch Gap</div>
   </div>
   <div style="text-align:center">
     <div style="font-size:22px;font-weight:800;color:{ORG};line-height:1">{pct}%</div>
-    <div style="font-size:9px;color:{TX2};text-transform:uppercase;letter-spacing:.06em">Quota Progress</div>
+    <div style="font-size:9px;color:{TX2};text-transform:uppercase;letter-spacing:.06em">Batch Progress</div>
   </div>
   <div style="text-align:right">
     <div style="font-size:12px;font-weight:700;color:{TX}">Trimble LATAM</div>
     <div style="font-size:10px;color:{TX2}">{view_label}</div>
   </div>
 </div>""", unsafe_allow_html=True)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BATCH HISTORY PANEL
+# Shows previously delivered batches for this region so investigators can see
+# what has already been shipped and what counts as new progress.
+# ─────────────────────────────────────────────────────────────────────────────
+_batches, _total_delivered = batch_history_summary(tab)
+if _batches:
+    with st.expander(
+        f"📦 Batch History — {cfg['name']} · "
+        f"{len(_batches)} batch{'es' if len(_batches)!=1 else ''} · "
+        f"{_total_delivered} total delivered",
+        expanded=False,
+    ):
+        _cols = st.columns(min(4, len(_batches)))
+        for _bi, _b in enumerate(_batches[:8]):
+            with _cols[_bi % len(_cols)]:
+                _bn   = _b.get("batch_number", "?")
+                _dd   = _b.get("delivery_date", "—")
+                _tc   = _b.get("total_cases", 0)
+                _prof = _b.get("profile", "")
+                st.markdown(f"""
+                <div style="background:{CARD};border:1px solid {BORD};border-radius:10px;
+                            padding:10px 12px;margin-bottom:6px">
+                  <div style="font-size:11px;font-weight:700;color:{ORG}">Batch #{_bn}</div>
+                  <div style="font-size:10px;color:{TX2};margin-top:2px">📅 {_dd}</div>
+                  <div style="font-size:13px;font-weight:700;color:{TX};margin-top:4px">
+                    {_tc} cases</div>
+                  <div style="font-size:9px;color:{TX2};margin-top:2px;
+                              white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+                    {_prof}</div>
+                </div>""", unsafe_allow_html=True)
+        if not has_batch_data:
+            st.caption("⚠️ Batch history not loaded — add GITHUB_TOKEN to Streamlit secrets.")
+elif not has_batch_data:
+    st.markdown(
+        f'<div style="font-size:11px;color:{TX2};padding:4px 0 8px">'
+        f'ℹ️ Batch history unavailable — GITHUB_TOKEN not set. '
+        f'New case counts reflect all generated cases.</div>',
+        unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN ROW
@@ -1075,9 +1249,12 @@ with mc1:
             hole=0.72, sort=False, textinfo="none", hoverinfo="none",
             marker_colors=[ORG, ABSC], showlegend=False,
         ))
+        # total here = total_new (batch-filtered); total_all = all generated
+        _inner_top   = f"<b>{total}</b>" if not has_batch_data else f"<b>{total}</b>"
+        _inner_label = "/ " + str(tq) + " quota"
         for txt, yp, sz, col in [
-            (f"<b>{total}</b>", 0.57, 26, TX),
-            (f"/ {tq} cases",  0.44, 10, TX2),
+            (_inner_top,    0.57, 26, TX),
+            (_inner_label,  0.44, 10, TX2),
             (f"<b>{pct}%</b>", 0.30, 14, ORG),
             (period_lbl.upper(), 0.16, 8, TX2),
         ]:
@@ -1089,9 +1266,10 @@ with mc1:
         st.plotly_chart(fig_g, use_container_width=True,
                         config={"displayModeBar": False})
         q_lbl = "Monthly quota" if view_is_month else "Weekly quota"
+        _dn = f" · {total_deliv} prev batch" if has_batch_data and total_deliv > 0 else ""
         st.markdown(
-            f'<p style="text-align:center;font-size:12px;font-weight:700;'
-            f'color:{ORG};margin-top:-20px">{gap} remaining · {q_lbl}</p>',
+            f'<p style="text-align:center;font-size:11px;font-weight:700;'
+            f'color:{ORG};margin-top:-20px">{gap} remaining · {total} new{_dn}</p>',
             unsafe_allow_html=True)
 
 with mc2:
@@ -1127,8 +1305,11 @@ with mc3:
     with st.container(border=True):
         st.markdown('<div class="sec-lbl">⚡ Key Highlights</div>',
                     unsafe_allow_html=True)
-        hl = [{"c": ORG, "t": "Batch in progress",
-               "s": f"{total}/{tq} — {gap} remaining"}]
+        hl = [{"c": ORG, "t": "Current batch progress",
+               "s": f"{total}/{tq} new cases — {gap} remaining"}]
+        if has_batch_data and total_deliv > 0:
+            hl.insert(0, {"c": TX2, "t": "Previously delivered",
+                          "s": f"{total_deliv} cases already in past batches"})
         for g in groups:
             left = max(0, g["eff_quota"] - g["done"])
             hc   = GRN if left==0 else (ORG if g["done"]/max(g["eff_quota"],1) >= 0.6 else RED)

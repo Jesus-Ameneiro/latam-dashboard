@@ -870,6 +870,30 @@ with ct:
 
 st.markdown(f'<hr style="border-color:{BORD}">', unsafe_allow_html=True)
 
+# ── Data source status strip ─────────────────────────────────────────────────
+_xlsx_ok  = st.session_state.xlsx_fetch_ok
+_batch_ok = st.session_state.batch_fetch_ok
+_xlsx_ts  = st.session_state.xlsx_fetch_ts or "—"
+_xlsx_err = st.session_state.xlsx_fetch_err
+
+_xlsx_dot  = f'<span style="color:{GRN}">●</span>' if _xlsx_ok  else f'<span style="color:{RED}">●</span>'
+_batch_dot = f'<span style="color:{GRN}">●</span>' if _batch_ok else f'<span style="color:{TX2}">●</span>'
+_xlsx_lbl  = (f'<b>LATAM xlsx</b> · fetched {_xlsx_ts}'
+              if _xlsx_ok
+              else f'<b>LATAM xlsx</b> · <span style="color:{RED}">not loaded</span>'
+                   + (f' — {_xlsx_err}' if _xlsx_err else ''))
+_batch_lbl = ('<b>Batch history</b> · loaded' if _batch_ok
+              else f'<b>Batch history</b> · <span style="color:{TX2}">unavailable</span>')
+
+st.markdown(
+    f'<div style="display:flex;align-items:center;gap:20px;padding:5px 2px 8px;'
+    f'font-size:11px;color:{TX2}">'
+    f'<span>{_xlsx_dot} {_xlsx_lbl}</span>'
+    f'<span style="color:{BORD}">|</span>'
+    f'<span>{_batch_dot} {_batch_lbl}</span>'
+    f'</div>',
+    unsafe_allow_html=True)
+
 # ─────────────────────────────────────────────────────────────────────────────
 # AUTO-FETCH ON STARTUP — both xlsx and batch history
 # ─────────────────────────────────────────────────────────────────────────────
@@ -904,6 +928,9 @@ with c_ref:
             st.error(st.session_state.xlsx_fetch_err or "Refresh failed.")
 
 # ── Week selector dropdown (Current / Previous) ──────────────────────────────
+# IMPORTANT: do NOT use key= on this selectbox. With a key, Streamlit caches the
+# widget's own value and ignores index= on reruns — causing stale view state.
+# Without a key, index= fully controls the displayed and returned value each run.
 with c_week:
     if has_weeks:
         def _wk_label(idx, prefix):
@@ -912,7 +939,7 @@ with c_week:
                 return f"{prefix} {fmt_date_range(w['start'], w['end'])}"
             return f"{prefix} Week {w['week_num']}"
 
-        week_options = []
+        week_options      = []
         week_option_views = []
         week_options.append(_wk_label(cur_idx, "★ Current:"))
         week_option_views.append("current")
@@ -920,22 +947,21 @@ with c_week:
             week_options.append(_wk_label(prev_idx, "← Previous:"))
             week_option_views.append("prev")
 
-        # Determine current selection index in dropdown
-        if view in ("current","prev") and view in week_option_views:
-            wk_sel_default = week_option_views.index(view)
-        else:
-            wk_sel_default = 0
+        # index= drives the DISPLAYED selection on every run — no key caching
+        _cur_view = view if view in week_option_views else "current"
+        wk_sel_idx = week_option_views.index(_cur_view)
 
         wk_choice = st.selectbox(
-            "Week", week_options, index=wk_sel_default,
+            "Week", week_options, index=wk_sel_idx,
             label_visibility="collapsed",
-            key="wk_dropdown",
             disabled=(view == "full_month"),
         )
+        # Detect user change and update session state immediately
         if view != "full_month":
             chosen_view = week_option_views[week_options.index(wk_choice)]
-            if chosen_view != view:
-                st.session_state.view = chosen_view; st.rerun()
+            if chosen_view != st.session_state.view:
+                st.session_state.view = chosen_view
+                st.rerun()
     else:
         st.markdown(
             f'<div style="font-size:11px;color:{TX2};padding-top:8px">'
@@ -1006,42 +1032,93 @@ with c_st:
         else:
             st.markdown(
                 f'<div style="font-size:11px;color:{TX2};padding-top:8px">'
-                f'⏳ Loading data from GitHub…</div>', unsafe_allow_html=True)
+                f'⏳ Loading…</div>', unsafe_allow_html=True)
     else:
         df_all = pd.DataFrame(st.session_state.all_cases)
         nm = len(df_all[df_all["region"]=="MCC"]) if not df_all.empty else 0
         nc = len(df_all[df_all["region"]=="CS"])  if not df_all.empty else 0
-        _ts   = st.session_state.xlsx_fetch_ts or "—"
-        _bh   = (f'<span style="color:{GRN}">📦 Batch history loaded</span>'
-                 if st.session_state.batch_fetch_ok
-                 else f'<span style="color:{TX2}">📦 No batch history</span>')
-        _err  = st.session_state.xlsx_fetch_err
-        _warn = (f'<br><span style="color:{RED};font-size:10px">⚠️ {_err}</span>'
-                 if _err else "")
         st.markdown(
             f'<div style="font-size:11px;color:{TX2};padding-top:2px;line-height:1.7">'
-            f'<span style="color:{GRN}">● GitHub</span> · fetched {_ts}<br>'
-            f'{len(st.session_state.all_cases)} cases · {len(all_weeks)} wks &nbsp;'
-            f'MCC <b style="color:{ORG}">{nm}</b> CS <b style="color:{ORG}">{nc}</b><br>'
-            f'{_bh}{_warn}'
+            f'{len(st.session_state.all_cases)} cases · {len(all_weeks)} weeks<br>'
+            f'MCC <b style="color:{ORG}">{nm}</b> &nbsp;·&nbsp; '
+            f'CS <b style="color:{ORG}">{nc}</b>'
             f'</div>', unsafe_allow_html=True)
 
-# ── Empty state ──────────────────────────────────────────────────────────────
+# ── Empty state — GitHub fetch failed, offer manual upload as fallback ────────
 if not has_weeks:
-    _err = st.session_state.xlsx_fetch_err
-    st.markdown(
-        f'<div style="text-align:center;padding:80px 20px">'
-        f'<div style="font-size:48px;margin-bottom:16px">📊</div>'
-        f'<div style="font-size:18px;font-weight:600;color:{TX};margin-bottom:8px">'
-        f'No data loaded</div>'
-        f'<div style="font-size:13px;color:{TX2};margin-bottom:12px">'
-        f'The dashboard fetches data automatically from GitHub.<br>'
-        f'Make sure <code>GITHUB_TOKEN</code> is set in Streamlit secrets.</div>'
-        + (f'<div style="font-size:12px;color:{RED};background:#FEE2E2;'
-           f'border-radius:8px;padding:8px 14px;display:inline-block">'
-           f'⚠️ {_err}</div>' if _err else "")
-        + f'</div>',
-        unsafe_allow_html=True)
+    _err       = st.session_state.xlsx_fetch_err or ""
+    _file_missing = "not found" in _err.lower() or "404" in _err
+    _no_token     = "GITHUB_TOKEN" in _err
+
+    st.markdown(f'<hr style="border-color:{BORD};margin:0 0 24px">', unsafe_allow_html=True)
+
+    col_info, col_upload = st.columns([1.2, 1])
+
+    with col_info:
+        st.markdown(f"""
+        <div style="padding:16px 0">
+          <div style="font-size:18px;font-weight:700;color:{TX};margin-bottom:8px">
+            📊 Data not loaded yet</div>
+          <div style="font-size:13px;color:{TX2};line-height:1.8;margin-bottom:12px">
+            The dashboard auto-fetches the xlsx from GitHub.<br>
+            If the file is not there yet, upload it once below to bootstrap.<br>
+            After the first upload the Apps Script will keep it in sync.
+          </div>
+        """, unsafe_allow_html=True)
+
+        if _err:
+            _err_color = RED
+            st.markdown(
+                f'<div style="font-size:12px;color:{_err_color};background:#FEE2E2;'
+                f'border-radius:8px;padding:10px 14px;margin-bottom:10px">'
+                f'⚠️ <b>GitHub fetch error:</b><br>{_err}</div>',
+                unsafe_allow_html=True)
+
+        if _file_missing:
+            st.markdown(f"""
+            <div style="font-size:12px;color:{TX2};background:{OL};border:1px solid {OB};
+                        border-radius:8px;padding:10px 14px;line-height:1.7">
+              <b>To push the file from Apps Script (one-time):</b><br>
+              1. Open the Google Sheet → Extensions → Apps Script<br>
+              2. Select <code>pushXlsxToGitHub</code> from the function dropdown<br>
+              3. Click <b>Run</b> — it will create the file in the repo<br>
+              4. Come back and click 🔄 Refresh above
+            </div>""", unsafe_allow_html=True)
+        elif _no_token:
+            st.markdown(f"""
+            <div style="font-size:12px;color:{TX2};background:{OL};border:1px solid {OB};
+                        border-radius:8px;padding:10px 14px;line-height:1.7">
+              <b>To set the token in Streamlit secrets:</b><br>
+              App settings → Secrets → add:<br>
+              <code>GITHUB_TOKEN = "ghp_..."</code>
+            </div>""", unsafe_allow_html=True)
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with col_upload:
+        st.markdown(
+            f'<div style="font-size:12px;font-weight:700;color:{TX};margin-bottom:6px">'
+            f'⬆️ Manual upload (bootstrap)</div>',
+            unsafe_allow_html=True)
+        st.caption("Upload the xlsx once. After that, GitHub auto-sync takes over.")
+        _fallback = st.file_uploader(
+            "Upload LATAM xlsx", type=["xlsx"],
+            label_visibility="collapsed",
+            key="xlsx_fallback_upload",
+            help="Bootstrap: upload the xlsx manually while GitHub sync is not yet set up",
+        )
+        if _fallback is not None:
+            with st.spinner("Parsing file…"):
+                _ok = load_xlsx(_fallback)
+            if _ok:
+                st.session_state.xlsx_fetch_ok  = True
+                st.session_state.xlsx_fetch_ts  = datetime.now().strftime("%b %d, %H:%M")
+                st.session_state.xlsx_fetch_err = None
+                st.toast("✅ File loaded — dashboard ready", icon="📊")
+                st.rerun()
+            else:
+                st.error("Could not parse the xlsx. Check the file and try again.")
+
     st.stop()
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1090,13 +1167,29 @@ if not week_start_str or not week_end_str:
 cases_df = pd.DataFrame(st.session_state.all_cases) if st.session_state.all_cases else EMPTY_DF
 has_data = not cases_df.empty
 
-# STEP 1: column-position region tag
+# STEP 1: column-position region tag (set during xlsx parsing by column group)
 r_data = cases_df[cases_df["region"] == tab].copy() if has_data else pd.DataFrame()
 
-# STEP 2: country-membership validation (prevents cross-region bleed when an
-# investigator works both regions, or Excel data-entry errors place a CS country
-# in an MCC column).
-region_countries = set(c for g in cfg["groups"] for c in g["countries"])
+# STEP 2: country-membership validation.
+# Use DEFAULT_REGIONS (not rcfg) as the authoritative country list.
+# rcfg is dynamically updated from the current week's Summary groups and may
+# drop countries when the Summary changes week-to-week, causing valid cases from
+# other weeks to be silently excluded. DEFAULT_REGIONS always holds the full
+# canonical list for each region.
+_default_countries = set(
+    c for g in DEFAULT_REGIONS[tab]["groups"] for c in g["countries"]
+)
+# Also include any countries present in all Summary groups across all weeks
+# (e.g. countries added by a newer batch that aren't in DEFAULT_REGIONS yet)
+_summary_countries = set()
+for _w in all_weeks:
+    _rk = "mcc" if tab == "MCC" else "cs"
+    for _g in _w.get(_rk, {}).get("groups", []):
+        for _c in _g.get("countries", []):
+            _summary_countries.add(_c)
+
+region_countries = _default_countries | _summary_countries
+
 if not r_data.empty:
     r_data = r_data[r_data["country"].isin(region_countries)]
 

@@ -1204,13 +1204,26 @@ for g in summary_groups:
         label=g["label"], quota=g["quota"], eff_quota=g["quota"], done=g_new,
     ))
 
-# ── Investigator stats from data sheet ───────────────────────────────────────
-# For full month: compute per-week breakdown for each investigator.
-# For week view: compute per-day breakdown within the calendar week.
+# ── Investigator stats: filtered by calendar date range ──────────────────────
+# Investigators may enter cases across batch tables (columns) during the same
+# calendar week. We count ALL their cases dated within week_start_str→week_end_str,
+# regardless of which column group (batch table) those cases belong to.
+# This gives the accurate picture of what the investigator actually worked
+# during the selected calendar week.
+# Batch progress (donut, groups) continues to use w_data (column-group filter).
+if week_start_str and week_end_str and not r_data.empty:
+    inv_data = r_data[
+        (r_data["date"] >= week_start_str) &
+        (r_data["date"] <= week_end_str)
+    ]
+else:
+    inv_data = w_data.copy()   # fallback (no week boundaries available)
+
+# m_data already filtered by calendar month — used for month total on cards
 
 invs = []
-if not w_data.empty:
-    for inv_name, grp in sorted(w_data.groupby("investigator"),
+if not inv_data.empty:
+    for inv_name, grp in sorted(inv_data.groupby("investigator"),
                                 key=lambda x: -len(x[1])):
         month_total = (len(m_data[m_data["investigator"] == inv_name])
                        if not m_data.empty else 0)
@@ -1220,12 +1233,12 @@ if not w_data.empty:
             support=(inv_name in cfg.get("support", [])),
         ))
 
-by_country = (w_data.groupby("country").size()
+by_country = (inv_data.groupby("country").size()
               .sort_values(ascending=False).to_dict()
-              if not w_data.empty else {})
+              if not inv_data.empty else {})
 
 by_inv_stat = [dict(name=i["name"], total=i["total"],
-                    pct=round(i["total"]/len(w_data)*100) if not w_data.empty else 0,
+                    pct=round(i["total"]/len(inv_data)*100) if not inv_data.empty else 0,
                     support=i["support"])
                for i in invs]
 
@@ -1248,7 +1261,7 @@ def _build_w_days(start_str, end_str):
     while cur <= end:
         if cur.weekday() < 5:
             ds = cur.strftime("%Y-%m-%d")
-            n  = len(w_data[w_data["date"] == ds]) if not w_data.empty else 0
+            n  = len(inv_data[inv_data["date"] == ds]) if not inv_data.empty else 0
             days.append(dict(ds=ds, day=_DAY[cur.weekday()],
                              label=fmt_day(ds), total=n))
         cur += timedelta(1)
@@ -1432,7 +1445,7 @@ with mc3:
                        "s": f"{g['done']}/{g['eff_quota']} — "
                             f"{'All complete ✓' if left==0 else f'{left} left'}"})
         if invs:
-            tp = round(invs[0]["total"]/len(w_data)*100) if not w_data.empty else 0
+            tp = round(invs[0]["total"]/len(inv_data)*100) if not inv_data.empty else 0
             hl.append({"c": ORG, "t": "Top investigator",
                        "s": f"{invs[0]['name']} · {invs[0]['total']} ({tp}%)"})
         for h in hl[:9]:

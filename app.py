@@ -79,6 +79,7 @@ EMPTY_DF = pd.DataFrame(columns=["date","case_id","country","investigator",
 for k, v in [
     ("all_cases",        []),
     ("all_weeks",        []),
+    ("all_disq_cases",   []),
     ("current_week_idx", 0),
     ("prev_week_idx",    0),
     ("view",             "current"),   # "prev" | "current"
@@ -539,6 +540,16 @@ def parse_data_sheet(wb, sheet_name, month_key):
                     continue
 
                 if is_disq(qa_notes):
+                    # Track disqualified cases separately (not in valid records)
+                    key_d = f"{case_id}|{investigator}|disq"
+                    if key_d not in seen:
+                        seen.add(key_d)
+                        records.append(dict(
+                            date=ds, case_id=case_id,
+                            country=country, investigator=investigator,
+                            week_num=week_num, region=region, month_key=month_key,
+                            disq=True,
+                        ))
                     continue
 
                 key = f"{case_id}|{investigator}"
@@ -550,6 +561,7 @@ def parse_data_sheet(wb, sheet_name, month_key):
                     date=ds, case_id=case_id,
                     country=country, investigator=investigator,
                     week_num=week_num, region=region, month_key=month_key,
+                    disq=False,
                 ))
             except Exception:
                 continue
@@ -567,7 +579,8 @@ def load_xlsx(file_obj):
 
     year        = datetime.today().year
     all_weeks   = []
-    all_cases   = []
+    all_cases   = []      # valid (non-disqualified) cases
+    all_disq    = []      # disqualified / rejected cases
     seen_keys   = set()
 
     # First pass: infer the correct year for each month sheet from actual case dates.
@@ -633,10 +646,13 @@ def load_xlsx(file_obj):
             try:
                 cases = parse_data_sheet(wb, sname, month_key)
                 for c in cases:
-                    key = f"{c['case_id']}|{c['investigator']}"
+                    key = f"{c['case_id']}|{c['investigator']}|{c.get('disq','')}"
                     if key not in seen_keys:
                         seen_keys.add(key)
-                        all_cases.append(c)
+                        if c.get("disq"):
+                            all_disq.append(c)
+                        else:
+                            all_cases.append(c)
             except Exception as ex:
                 st.warning(f"⚠ Could not parse {sname}: {ex}")
 
@@ -713,6 +729,7 @@ def load_xlsx(file_obj):
     # Update session state
     st.session_state.all_weeks        = all_weeks
     st.session_state.all_cases        = all_cases
+    st.session_state.all_disq_cases   = all_disq
     st.session_state.current_week_idx = cur_idx
     st.session_state.prev_week_idx    = prev_idx
     st.session_state.view             = "current"
@@ -1733,3 +1750,422 @@ with bc2:
                             config={"displayModeBar": False})
         else:
             st.markdown(_no_data(), unsafe_allow_html=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REPORT GENERATOR
+# ─────────────────────────────────────────────────────────────────────────────
+from openpyxl import Workbook
+from openpyxl.styles import (Font, PatternFill, Alignment, Border, Side,
+                              GradientFill)
+from openpyxl.utils import get_column_letter
+
+def _rpt_border(thin=True):
+    s = Side(style="thin" if thin else "medium", color="DDDDDD")
+    return Border(left=s, right=s, top=s, bottom=s)
+
+def _rpt_cell(ws, row, col, value, bold=False, bg=None, fg="000000",
+              align="left", wrap=False, size=10, border=True):
+    c = ws.cell(row=row, column=col, value=value)
+    c.font      = Font(name="Arial", bold=bold, color=fg, size=size)
+    c.alignment = Alignment(horizontal=align, vertical="center", wrap_text=wrap)
+    if bg:
+        c.fill = PatternFill("solid", start_color=bg)
+    if border:
+        c.border = _rpt_border()
+    return c
+
+def _badge(n, daily_min, daily_ideal):
+    if n >= daily_ideal: return "✓ Goal Met"
+    if n <= daily_min:   return "⚠ Critical"
+    return "~ Below Goal"
+
+def _week_badge(n, wmin, wideal):
+    if n >= wideal: return "✓ Goal Met"
+    if n <= wmin:   return "⚠ Critical"
+    return "~ Below Goal"
+
+
+def generate_daily_report(tab, cfg, inv_data_df, disq_df,
+                          week_start, week_end, sel_week_label,
+                          batch_label, total_new, tq, region_countries):
+    """Generate a professional daily report for the most recent worked day."""
+    import pandas as pd
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Daily Report"
+
+    # Determine report date = most recent date in inv_data
+    if inv_data_df.empty:
+        report_date = week_end or ""
+    else:
+        report_date = inv_data_df["date"].max()
+
+    # Filter to report date
+    day_df = inv_data_df[inv_data_df["date"] == report_date] if not inv_data_df.empty else pd.DataFrame()
+    day_disq = disq_df[disq_df["date"] == report_date] if not disq_df.empty else pd.DataFrame()
+
+    # ── Column widths ───────────────────────────────────────────────────────
+    col_w = [28, 14, 16, 12, 12, 14]
+    for i, w in enumerate(col_w, 1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+    ws.row_dimensions[1].height = 36
+    ws.row_dimensions[2].height = 18
+    ws.row_dimensions[3].height = 14
+
+    # ── Header ─────────────────────────────────────────────────────────────
+    BG_DARK = "1A1614"; BG_ORG = "F97316"; BG_LIGHT = "FFF8F4"
+    BG_HDR  = "2D2520"; BG_ROW1 = "FFFFFF"; BG_ROW2 = "FFF3EA"
+    TXT_W   = "FAFAF9"; TXT_D   = "1C1917"; TXT_MUT = "78716C"
+
+    ws.merge_cells("A1:F1")
+    _rpt_cell(ws,"1"[0] if False else 1, 1,
+              f"RUVIXX  ·  Daily Case Investigation Report",
+              bold=True, bg=BG_DARK, fg=TXT_W, align="left", size=13, border=False)
+
+    ws.merge_cells("A2:D2")
+    _rpt_cell(ws, 2, 1, f"Date: {report_date}   |   Region: {cfg['name']}   |   Week: {sel_week_label}",
+              bg=BG_HDR, fg="F97316", align="left", size=9, border=False)
+    ws.merge_cells("E2:F2")
+    _rpt_cell(ws, 2, 5,
+              f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+              bg=BG_HDR, fg=TXT_MUT, align="right", size=9, border=False)
+
+    # ── Summary strip ───────────────────────────────────────────────────────
+    r = 4
+    for col, lbl in enumerate(["Cases Generated","Disq / Rejected","Net Valid",
+                                "Investigators Active","Daily Goal","Batch"], 1):
+        _rpt_cell(ws, r, col, lbl, bold=True, bg=BG_ORG, fg=TXT_W, align="center", size=9)
+
+    r = 5
+    total_gen  = len(day_df)
+    total_disq = len(day_disq)
+    net_valid  = total_gen
+    n_inv      = day_df["investigator"].nunique() if not day_df.empty else 0
+    vals = [total_gen, total_disq, net_valid, n_inv,
+            cfg["daily_ideal"], batch_label]
+    for col, val in enumerate(vals, 1):
+        _rpt_cell(ws, r, col, val, bold=True, bg=BG_LIGHT, align="center", size=11)
+
+    # ── Investigator breakdown ───────────────────────────────────────────────
+    r = 7
+    ws.merge_cells(f"A{r}:F{r}")
+    _rpt_cell(ws, r, 1, "INVESTIGATOR PERFORMANCE", bold=True, bg=BG_ORG,
+              fg=TXT_W, align="left", size=9, border=False)
+
+    r = 8
+    hdrs = ["Investigator","Cases Today","Disq/Rejected","Net Valid",
+            f"Goal ({cfg['daily_ideal']})", "Status"]
+    for col, h in enumerate(hdrs, 1):
+        _rpt_cell(ws, r, col, h, bold=True, bg="E7E7E7", fg=TXT_D, align="center", size=9)
+
+    # Build per-investigator stats
+    all_invs = sorted(set(
+        list(day_df["investigator"].unique() if not day_df.empty else []) +
+        list(day_disq["investigator"].unique() if not day_disq.empty else [])
+    ), key=lambda x: -(len(day_df[day_df["investigator"]==x]) if not day_df.empty else 0))
+
+    for i, inv in enumerate(all_invs):
+        r += 1
+        n_gen   = len(day_df[day_df["investigator"]==inv]) if not day_df.empty else 0
+        n_disq  = len(day_disq[day_disq["investigator"]==inv]) if not day_disq.empty else 0
+        bg = BG_ROW1 if i % 2 == 0 else BG_ROW2
+        status  = _badge(n_gen, cfg["daily_min"], cfg["daily_ideal"])
+        s_color = "16A34A" if "Goal" in status else ("EF4444" if "Critical" in status else "D97706")
+        _rpt_cell(ws, r, 1, inv, bg=bg, fg=TXT_D)
+        _rpt_cell(ws, r, 2, n_gen,  bg=bg, fg=TXT_D, align="center")
+        _rpt_cell(ws, r, 3, n_disq, bg=bg, fg="EF4444" if n_disq else TXT_D, align="center", bold=n_disq>0)
+        _rpt_cell(ws, r, 4, n_gen,  bg=bg, fg=TXT_D, align="center")
+        _rpt_cell(ws, r, 5, cfg["daily_ideal"], bg=bg, fg=TXT_MUT, align="center")
+        _rpt_cell(ws, r, 6, status, bg=bg, fg=s_color, align="center", bold=True)
+
+    if not all_invs:
+        r += 1
+        ws.merge_cells(f"A{r}:F{r}")
+        _rpt_cell(ws, r, 1, "No cases recorded for this date.", bg=BG_LIGHT, fg=TXT_MUT, align="center")
+
+    # ── Country breakdown ────────────────────────────────────────────────────
+    r += 2
+    ws.merge_cells(f"A{r}:C{r}")
+    _rpt_cell(ws, r, 1, "CASES BY COUNTRY", bold=True, bg=BG_ORG,
+              fg=TXT_W, align="left", size=9, border=False)
+    ws.merge_cells(f"D{r}:F{r}")
+    _rpt_cell(ws, r, 4, "", bg=BG_ORG, border=False)
+
+    if not day_df.empty:
+        by_ctr = day_df.groupby("country").size().sort_values(ascending=False)
+        for i, (ctr, cnt) in enumerate(by_ctr.items()):
+            r += 1
+            bg = BG_ROW1 if i % 2 == 0 else BG_ROW2
+            _rpt_cell(ws, r, 1, ctr, bg=bg, fg=TXT_D)
+            _rpt_cell(ws, r, 2, cnt, bg=bg, fg=TXT_D, align="center", bold=True)
+            ws.merge_cells(f"C{r}:F{r}")
+            pct = round(cnt / len(day_df) * 100)
+            _rpt_cell(ws, r, 3, f"{pct}%", bg=bg, fg=TXT_MUT, align="left")
+
+    # ── Footer ───────────────────────────────────────────────────────────────
+    r += 2
+    ws.merge_cells(f"A{r}:F{r}")
+    _rpt_cell(ws, r, 1,
+              f"Ruvixx · Case Investigation · {cfg['name']} · Contact: {cfg['contact']}",
+              bg=BG_DARK, fg=TXT_MUT, align="center", size=8, border=False)
+
+    ws.print_area = f"A1:F{r}"
+    ws.page_setup.fitToPage = True
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf.getvalue(), report_date
+
+
+def generate_weekly_report(tab, cfg, inv_data_df, disq_df,
+                            week_start, week_end, sel_week_label,
+                            batch_label, total_new, tq, w_days):
+    """Generate a professional weekly report across Mon–Fri."""
+    import pandas as pd
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Weekly Report"
+
+    BG_DARK = "1A1614"; BG_ORG = "F97316"; BG_LIGHT = "FFF8F4"
+    BG_HDR  = "2D2520"; BG_ROW1 = "FFFFFF"; BG_ROW2 = "FFF3EA"
+    TXT_W   = "FAFAF9"; TXT_D   = "1C1917"; TXT_MUT = "78716C"
+
+    # Day columns from w_days (max 5)
+    day_cols = [d["ds"] for d in w_days]   # e.g. ["2026-05-25", ...]
+    day_lbls = [d["day"] for d in w_days]  # e.g. ["Mon", "Tue", ...]
+    n_days   = len(day_cols)
+
+    # Total columns: Investigator | Mon…Fri | Week Total | Disq | Net | Goal | Status
+    total_cols = 1 + n_days + 5
+
+    # ── Column widths ────────────────────────────────────────────────────────
+    ws.column_dimensions["A"].width = 26   # Investigator
+    for i in range(n_days):
+        ws.column_dimensions[get_column_letter(2 + i)].width = 9
+    offset = 2 + n_days
+    for i, w in enumerate([11, 11, 9, 9, 13]):
+        ws.column_dimensions[get_column_letter(offset + i)].width = w
+    ws.row_dimensions[1].height = 36
+
+    last_col = total_cols
+
+    # ── Header ───────────────────────────────────────────────────────────────
+    ws.merge_cells(f"A1:{get_column_letter(last_col)}1")
+    _rpt_cell(ws, 1, 1, "RUVIXX  ·  Weekly Case Investigation Report",
+              bold=True, bg=BG_DARK, fg=TXT_W, align="left", size=13, border=False)
+
+    ws.merge_cells(f"A2:{get_column_letter(max(1,last_col-2))}2")
+    _rpt_cell(ws, 2, 1,
+              f"Week: {sel_week_label}   |   Region: {cfg['name']}   |   {week_start} → {week_end}",
+              bg=BG_HDR, fg="F97316", align="left", size=9, border=False)
+    ws.merge_cells(f"{get_column_letter(last_col-1)}2:{get_column_letter(last_col)}2")
+    _rpt_cell(ws, 2, last_col-1,
+              f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+              bg=BG_HDR, fg=TXT_MUT, align="right", size=9, border=False)
+
+    # ── Summary strip ────────────────────────────────────────────────────────
+    r = 4
+    sum_hdrs = ["Total Cases","Disq/Rejected","Net Valid",
+                "Investigators","Weekly Goal", "Batch Progress"]
+    for ci, lbl in enumerate(sum_hdrs, 1):
+        _rpt_cell(ws, r, ci, lbl, bold=True, bg=BG_ORG, fg=TXT_W, align="center", size=9)
+
+    r = 5
+    total_gen  = len(inv_data_df) if not inv_data_df.empty else 0
+    total_disq = len(disq_df) if not disq_df.empty else 0
+    n_inv      = inv_data_df["investigator"].nunique() if not inv_data_df.empty else 0
+    pct_batch  = f"{round(total_new/tq*100)}% of {tq}" if tq else "—"
+    for ci, val in enumerate([total_gen, total_disq, total_gen,
+                               n_inv, cfg["weekly_ideal"], pct_batch], 1):
+        _rpt_cell(ws, r, ci, val, bold=True, bg=BG_LIGHT, align="center", size=11)
+
+    # ── Investigator table ───────────────────────────────────────────────────
+    r = 7
+    ws.merge_cells(f"A{r}:{get_column_letter(last_col)}{r}")
+    _rpt_cell(ws, r, 1, "INVESTIGATOR PERFORMANCE — DAILY BREAKDOWN",
+              bold=True, bg=BG_ORG, fg=TXT_W, align="left", size=9, border=False)
+
+    r = 8
+    _rpt_cell(ws, r, 1, "Investigator", bold=True, bg="E7E7E7", fg=TXT_D, align="center", size=9)
+    for di, (ds, dlbl) in enumerate(zip(day_cols, day_lbls)):
+        col_lbl = f"{dlbl}\n{ds[5:]}"  # "Mon\n05-25"
+        _rpt_cell(ws, r, 2+di, col_lbl, bold=True, bg="E7E7E7", fg=TXT_D,
+                  align="center", size=8, wrap=True)
+        ws.row_dimensions[r].height = 28
+
+    off = 2 + n_days
+    for ci, lbl in enumerate(["Week Total","Disq","Net Valid",
+                               f"Goal ({cfg['weekly_ideal']})","Status"], off):
+        _rpt_cell(ws, r, ci, lbl, bold=True, bg="E7E7E7", fg=TXT_D, align="center", size=9)
+        off = ci + 1
+
+    all_invs = sorted(
+        set(
+            list(inv_data_df["investigator"].unique() if not inv_data_df.empty else []) +
+            list(disq_df["investigator"].unique() if not disq_df.empty else [])
+        ),
+        key=lambda x: -(len(inv_data_df[inv_data_df["investigator"]==x]) if not inv_data_df.empty else 0)
+    )
+
+    for i, inv in enumerate(all_invs):
+        r += 1
+        bg     = BG_ROW1 if i % 2 == 0 else BG_ROW2
+        inv_df = inv_data_df[inv_data_df["investigator"]==inv] if not inv_data_df.empty else pd.DataFrame()
+        inv_dq = disq_df[disq_df["investigator"]==inv] if not disq_df.empty else pd.DataFrame()
+        week_t = len(inv_df)
+        week_d = len(inv_dq)
+        status = _week_badge(week_t, cfg["weekly_min"], cfg["weekly_ideal"])
+        s_col  = "16A34A" if "Goal" in status else ("EF4444" if "Critical" in status else "D97706")
+
+        _rpt_cell(ws, r, 1, inv, bg=bg, fg=TXT_D, bold=True)
+
+        for di, ds in enumerate(day_cols):
+            day_n = len(inv_df[inv_df["date"]==ds]) if not inv_df.empty else 0
+            day_c = ("16A34A" if day_n >= cfg["daily_ideal"]
+                     else ("EF4444" if day_n <= cfg["daily_min"] and day_n > 0
+                           else (TXT_MUT if day_n == 0 else "D97706")))
+            _rpt_cell(ws, r, 2+di, day_n if day_n else "–",
+                      bg=bg, fg=day_c, align="center",
+                      bold=(day_n >= cfg["daily_ideal"]))
+
+        off2 = 2 + n_days
+        _rpt_cell(ws, r, off2,   week_t, bg=bg, fg=TXT_D, align="center", bold=True)
+        _rpt_cell(ws, r, off2+1, week_d if week_d else "–", bg=bg,
+                  fg="EF4444" if week_d else TXT_MUT, align="center", bold=week_d>0)
+        _rpt_cell(ws, r, off2+2, week_t, bg=bg, fg=TXT_D, align="center")
+        _rpt_cell(ws, r, off2+3, cfg["weekly_ideal"], bg=bg, fg=TXT_MUT, align="center")
+        _rpt_cell(ws, r, off2+4, status, bg=bg, fg=s_col, align="center", bold=True)
+
+    if not all_invs:
+        r += 1
+        ws.merge_cells(f"A{r}:{get_column_letter(last_col)}{r}")
+        _rpt_cell(ws, r, 1, "No cases recorded for this week.", bg=BG_LIGHT, fg=TXT_MUT, align="center")
+
+    # ── Country breakdown ─────────────────────────────────────────────────────
+    r += 2
+    ws.merge_cells(f"A{r}:C{r}")
+    _rpt_cell(ws, r, 1, "CASES BY COUNTRY", bold=True, bg=BG_ORG,
+              fg=TXT_W, align="left", size=9, border=False)
+    ws.merge_cells(f"D{r}:{get_column_letter(last_col)}{r}")
+    _rpt_cell(ws, r, 4, "", bg=BG_ORG, border=False)
+
+    if not inv_data_df.empty:
+        by_ctr = inv_data_df.groupby("country").size().sort_values(ascending=False)
+        for j, (ctr, cnt) in enumerate(by_ctr.items()):
+            r += 1
+            bg = BG_ROW1 if j % 2 == 0 else BG_ROW2
+            _rpt_cell(ws, r, 1, ctr, bg=bg, fg=TXT_D)
+            _rpt_cell(ws, r, 2, cnt, bg=bg, fg=TXT_D, align="center", bold=True)
+            ws.merge_cells(f"C{r}:{get_column_letter(last_col)}{r}")
+            _rpt_cell(ws, r, 3, f"{round(cnt/len(inv_data_df)*100)}%",
+                      bg=bg, fg=TXT_MUT, align="left")
+
+    # ── Footer ────────────────────────────────────────────────────────────────
+    r += 2
+    ws.merge_cells(f"A{r}:{get_column_letter(last_col)}{r}")
+    _rpt_cell(ws, r, 1,
+              f"Ruvixx · Case Investigation · {cfg['name']} · Contact: {cfg['contact']}",
+              bg=BG_DARK, fg=TXT_MUT, align="center", size=8, border=False)
+
+    ws.print_area = f"A1:{get_column_letter(last_col)}{r}"
+    ws.page_setup.fitToPage    = True
+    ws.page_setup.fitToWidth   = 1
+    ws.page_setup.fitToHeight  = 0
+    ws.page_setup.orientation  = "landscape"
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf.getvalue()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REPORT BUTTONS — below the main dashboard
+# ─────────────────────────────────────────────────────────────────────────────
+st.markdown("<br>", unsafe_allow_html=True)
+st.markdown(
+    f'<div class="sec-lbl">📄 Generate Report</div>',
+    unsafe_allow_html=True)
+
+# Build disq_data for current tab + date scope
+disq_df_all = pd.DataFrame(st.session_state.all_disq_cases) if st.session_state.all_disq_cases else pd.DataFrame()
+if not disq_df_all.empty:
+    disq_tab  = disq_df_all[disq_df_all["region"] == tab].copy()
+    disq_tab  = disq_tab[disq_tab["country"].isin(region_countries)]
+    disq_week = disq_tab[
+        (disq_tab["date"] >= week_start_str) &
+        (disq_tab["date"] <= week_end_str)
+    ] if week_start_str and week_end_str else pd.DataFrame()
+else:
+    disq_week = pd.DataFrame()
+
+rb1, rb2, rb3 = st.columns([1, 1, 3])
+
+with rb1:
+    if st.button("📊 Daily Report", key="btn_daily_rpt",
+                 use_container_width=True, type="secondary"):
+        with st.spinner("Generating daily report…"):
+            rpt_bytes, rpt_date = generate_daily_report(
+                tab=tab, cfg=cfg,
+                inv_data_df=inv_data,
+                disq_df=disq_week,
+                week_start=week_start_str,
+                week_end=week_end_str,
+                sel_week_label=sel_week["label"],
+                batch_label=batch_label,
+                total_new=total_new, tq=tq,
+                region_countries=region_countries,
+            )
+        st.session_state["_daily_rpt_bytes"] = rpt_bytes
+        st.session_state["_daily_rpt_date"]  = rpt_date
+        st.session_state["_weekly_rpt_bytes"] = None
+
+with rb2:
+    if st.button("📋 Weekly Report", key="btn_weekly_rpt",
+                 use_container_width=True, type="secondary"):
+        with st.spinner("Generating weekly report…"):
+            rpt_bytes = generate_weekly_report(
+                tab=tab, cfg=cfg,
+                inv_data_df=inv_data,
+                disq_df=disq_week,
+                week_start=week_start_str,
+                week_end=week_end_str,
+                sel_week_label=sel_week["label"],
+                batch_label=batch_label,
+                total_new=total_new, tq=tq,
+                w_days=w_days,
+            )
+        st.session_state["_weekly_rpt_bytes"] = rpt_bytes
+        st.session_state["_daily_rpt_bytes"]  = None
+
+# Show download button once report is ready
+_daily_bytes  = st.session_state.get("_daily_rpt_bytes")
+_weekly_bytes = st.session_state.get("_weekly_rpt_bytes")
+_rpt_date     = st.session_state.get("_daily_rpt_date", "")
+
+if _daily_bytes:
+    fname = f"Ruvixx_Daily_{tab}_{_rpt_date}.xlsx"
+    with rb1:
+        st.download_button(
+            f"⬇️ Download — {_rpt_date}",
+            data=_daily_bytes,
+            file_name=fname,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="dl_daily", use_container_width=True, type="primary",
+        )
+elif _weekly_bytes:
+    fname = f"Ruvixx_Weekly_{tab}_{week_start_str}_{week_end_str}.xlsx"
+    with rb2:
+        st.download_button(
+            f"⬇️ Download — {sel_week['label']}",
+            data=_weekly_bytes,
+            file_name=fname,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="dl_weekly", use_container_width=True, type="primary",
+        )

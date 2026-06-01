@@ -88,14 +88,16 @@ for k, v in [
     ("rcfg",             copy.deepcopy(DEFAULT_REGIONS)),
     ("_prev_dark",       None),
     # ── xlsx fetch state ──────────────────────────────────────────────────────
-    ("xlsx_fetch_ok",    False),       # True once xlsx loaded from GitHub
-    ("xlsx_last_sha",    None),        # GitHub SHA of the last fetched xlsx
-    ("xlsx_fetch_ts",    None),        # ISO timestamp of last successful fetch
-    ("xlsx_fetch_err",   None),        # last error message, or None
-    # ── Batch history (from prebatch-delivery GitHub repo) ────────────────────
+    ("xlsx_fetch_ok",    False),
+    ("xlsx_last_sha",    None),
+    ("xlsx_fetch_ts",    None),
+    ("xlsx_fetch_err",   None),
+    # ── Batch history ─────────────────────────────────────────────────────────
     ("batch_history",    None),
     ("delivered_ids",    {"MCC": set(), "CS": set()}),
     ("batch_fetch_ok",   False),
+    # ── UI sync ───────────────────────────────────────────────────────────────
+    ("_reset_wk_dropdown", False),  # set True when an external event resets view→"current"
 ]:
     if k not in st.session_state:
         st.session_state[k] = v
@@ -700,6 +702,7 @@ def load_xlsx(file_obj):
     st.session_state.prev_week_idx    = prev_idx
     st.session_state.view             = "current"
     st.session_state.full_month_key   = all_weeks[cur_idx]["month_key"] if all_weeks else None
+    st.session_state._reset_wk_dropdown = True   # force dropdown to "current" after reload
 
     # Rebuild rcfg from current week's Summary so sidebar shows live data
     if all_weeks and cur_idx < len(all_weeks):
@@ -903,6 +906,120 @@ if not st.session_state.xlsx_fetch_ok:
         fetch_batch_history()
 
 # ─────────────────────────────────────────────────────────────────────────────
+# DEBUG PANEL — collapsible, always available
+# Shows exactly what was loaded at each pipeline stage so data issues are
+# immediately visible without deploying separate logging infrastructure.
+# ─────────────────────────────────────────────────────────────────────────────
+with st.expander("🔍 Debug — Data Load & Filter Audit", expanded=False):
+    _all_c = st.session_state.all_cases
+    _all_w = st.session_state.all_weeks
+
+    dc1, dc2, dc3 = st.columns(3)
+    with dc1:
+        st.markdown("**📥 GitHub Fetch**")
+        st.markdown(f"""
+        | Source | Status | Detail |
+        |--------|--------|--------|
+        | xlsx | {'✅ OK' if st.session_state.xlsx_fetch_ok else '❌ FAIL'} | fetched {st.session_state.xlsx_fetch_ts or '—'} |
+        | Batch JSON | {'✅ OK' if st.session_state.batch_fetch_ok else '❌ FAIL'} | {'loaded' if st.session_state.batch_fetch_ok else 'unavailable'} |
+        """)
+        if st.session_state.xlsx_fetch_err:
+            st.error(f"xlsx error: {st.session_state.xlsx_fetch_err}")
+        if st.session_state.xlsx_last_sha:
+            st.caption(f"SHA: {st.session_state.xlsx_last_sha[:12]}…")
+
+    with dc2:
+        st.markdown("**📊 Parsed Data**")
+        _mcc_c = sum(1 for c in _all_c if c.get("region") == "MCC")
+        _cs_c  = sum(1 for c in _all_c if c.get("region") == "CS")
+        _unk_c = len(_all_c) - _mcc_c - _cs_c
+        st.markdown(f"""
+        | Metric | Value |
+        |--------|-------|
+        | Total cases | **{len(_all_c)}** |
+        | MCC region | {_mcc_c} |
+        | CS region | {_cs_c} |
+        | Unknown region | {_unk_c} |
+        | Weeks parsed | {len(_all_w)} |
+        """)
+        if _all_c:
+            _dates = sorted(set(c["date"] for c in _all_c))
+            st.caption(f"Date range: {_dates[0]} → {_dates[-1]}")
+        if _all_w:
+            _mths = sorted(set(w["month_key"] for w in _all_w))
+            st.caption(f"Months: {', '.join(_mths)}")
+
+    with dc3:
+        st.markdown("**📦 Batch History**")
+        _bh = st.session_state.batch_history
+        if _bh:
+            _mcc_del = st.session_state.delivered_ids.get("MCC", set())
+            _cs_del  = st.session_state.delivered_ids.get("CS",  set())
+            _mcc_b   = len(_bh.get("MCC", []))
+            _cs_b    = len(_bh.get("CS",  []))
+            st.markdown(f"""
+            | Region | Batches | Delivered IDs |
+            |--------|---------|--------------|
+            | MCC | {_mcc_b} | {len(_mcc_del)} |
+            | CS  | {_cs_b} | {len(_cs_del)} |
+            """)
+            _mcc_list = _bh.get("MCC", [])
+            _cs_list  = _bh.get("CS",  [])
+            for b in sorted(_mcc_list + _cs_list,
+                            key=lambda x: x.get("batch_number", 0)):
+                st.caption(
+                    f"#{b.get('batch_number','?')} "
+                    f"{b.get('region','?')} · "
+                    f"{b.get('delivery_date','?')} · "
+                    f"{b.get('total_cases','?')} cases")
+        else:
+            st.info("No batch history loaded.")
+
+    # Live filter trace — shows current tab/week/date filter state
+    st.markdown("---")
+    st.markdown("**🔎 Current Filter State** (live)")
+    _cur_view = st.session_state.view
+    _cur_tab  = st.session_state.tab
+    _ci = st.session_state.current_week_idx
+    _pi = st.session_state.prev_week_idx
+    _sel_i = _pi if _cur_view == "prev" else _ci
+    _sw = _all_w[_sel_i] if _all_w and _sel_i < len(_all_w) else {}
+
+    import calendar as _cal_dbg
+    _mk = _sw.get("month_key", "—")
+    _wn = _sw.get("week_num", "—")
+    if _mk and _mk != "—" and isinstance(_wn, int):
+        _y2, _m2 = int(_mk[:4]), int(_mk[5:])
+        _ws2, _we2 = _calc_week_dates(_y2, _m2, _wn)
+    else:
+        _ws2 = _we2 = "—"
+
+    # Count cases at each filter stage for the current tab
+    _rc = sum(1 for c in _all_c
+              if c.get("region") == _cur_tab and
+              c.get("country") in
+              set(ct for g in DEFAULT_REGIONS[_cur_tab]["groups"] for ct in g["countries"]))
+    _wc = sum(1 for c in _all_c
+              if c.get("region") == _cur_tab and
+              c.get("country") in
+              set(ct for g in DEFAULT_REGIONS[_cur_tab]["groups"] for ct in g["countries"]) and
+              _ws2 != "—" and _ws2 <= c.get("date","") <= _we2)
+
+    st.markdown(f"""
+    | Key | Value |
+    |-----|-------|
+    | Active tab | **{_cur_tab}** |
+    | View | **{_cur_view}** |
+    | sel_week index | {_sel_i} (cur={_ci}, prev={_pi}) |
+    | sel_week month | {_mk} · Week {_wn} |
+    | Calendar window | **{_ws2}** → **{_we2}** |
+    | r_data (region filter) | **{_rc}** cases |
+    | w_data (date filter) | **{_wc}** cases |
+    | wk_dropdown state | `{st.session_state.get("wk_dropdown","—")}` |
+    | _reset_wk_dropdown | {st.session_state.get("_reset_wk_dropdown", False)} |
+    """)
+
+# ─────────────────────────────────────────────────────────────────────────────
 # CONTROLS  —  REFRESH  +  VIEW SELECTOR
 # ─────────────────────────────────────────────────────────────────────────────
 all_weeks = st.session_state.all_weeks
@@ -928,11 +1045,15 @@ with c_ref:
             st.error(st.session_state.xlsx_fetch_err or "Refresh failed.")
 
 # ── Week selector dropdown (Current / Previous) ──────────────────────────────
-# key="wk_dropdown" is REQUIRED so Streamlit persists the user's selection
-# across reruns. Without it, Streamlit ignores the user's choice and resets
-# to index= on every rerun — making the widget appear frozen.
-# We sync st.session_state["wk_dropdown"] whenever view changes from outside
-# (e.g. tab switch, Full Month toggle) so the dropdown always matches view.
+# Design rules:
+#  1. key="wk_dropdown" makes Streamlit persist the user's selection in
+#     st.session_state["wk_dropdown"] — it must never be overwritten except on
+#     controlled external resets.
+#  2. We ONLY reset the dropdown state when _reset_wk_dropdown=True (set by
+#     load_xlsx or Full Month toggle-off). Any other preemptive override
+#     reverts the user's selection before we read it → infinite revert loop.
+#  3. After reading the user's choice, if it differs from view, update view
+#     and rerun. Streamlit will then show the correct data for the new week.
 with c_week:
     if has_weeks:
         def _wk_label(idx, prefix):
@@ -949,14 +1070,15 @@ with c_week:
             week_options.append(_wk_label(prev_idx, "← Previous:"))
             week_option_views.append("prev")
 
-        # Determine which option matches the current view
-        _target_view = view if view in week_option_views else "current"
-        _target_opt  = week_options[week_option_views.index(_target_view)]
+        # Reset dropdown ONLY when explicitly flagged (file reload / FM toggle-off)
+        if st.session_state._reset_wk_dropdown:
+            st.session_state["wk_dropdown"] = week_options[0]  # "★ Current:…"
+            st.session_state._reset_wk_dropdown = False
 
-        # Sync session state to match view whenever it changes from outside
-        # (tab switch, Full Month toggle off, etc.)
-        if st.session_state.get("wk_dropdown") != _target_opt and view != "full_month":
-            st.session_state["wk_dropdown"] = _target_opt
+        # If the stored value is stale (not in current options), fix it quietly
+        if st.session_state.get("wk_dropdown") not in week_options:
+            _fallback_view = view if view in week_option_views else "current"
+            st.session_state["wk_dropdown"] = week_options[week_option_views.index(_fallback_view)]
 
         wk_choice = st.selectbox(
             "Week", week_options,
@@ -964,7 +1086,8 @@ with c_week:
             label_visibility="collapsed",
             disabled=(view == "full_month"),
         )
-        # Detect user changing the dropdown → update view + rerun
+
+        # Detect user changing the dropdown → update view, rerun to apply
         if view != "full_month":
             chosen_view = week_option_views[week_options.index(wk_choice)]
             if chosen_view != view:
@@ -985,9 +1108,9 @@ with c_fm:
         disabled=not has_weeks,
     ):
         if view == "full_month":
-            # Toggle off → back to current week; also reset dropdown to "current"
+            # Toggle off → back to current week; flag dropdown to reset on next render
             st.session_state.view = "current"
-            st.session_state["wk_dropdown"] = None   # cleared — sync runs on next render
+            st.session_state._reset_wk_dropdown = True
         else:
             st.session_state.view = "full_month"
             # Default full_month_key to current month

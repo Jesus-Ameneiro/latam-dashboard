@@ -906,120 +906,6 @@ if not st.session_state.xlsx_fetch_ok:
         fetch_batch_history()
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DEBUG PANEL — collapsible, always available
-# Shows exactly what was loaded at each pipeline stage so data issues are
-# immediately visible without deploying separate logging infrastructure.
-# ─────────────────────────────────────────────────────────────────────────────
-with st.expander("🔍 Debug — Data Load & Filter Audit", expanded=False):
-    _all_c = st.session_state.all_cases
-    _all_w = st.session_state.all_weeks
-
-    dc1, dc2, dc3 = st.columns(3)
-    with dc1:
-        st.markdown("**📥 GitHub Fetch**")
-        st.markdown(f"""
-        | Source | Status | Detail |
-        |--------|--------|--------|
-        | xlsx | {'✅ OK' if st.session_state.xlsx_fetch_ok else '❌ FAIL'} | fetched {st.session_state.xlsx_fetch_ts or '—'} |
-        | Batch JSON | {'✅ OK' if st.session_state.batch_fetch_ok else '❌ FAIL'} | {'loaded' if st.session_state.batch_fetch_ok else 'unavailable'} |
-        """)
-        if st.session_state.xlsx_fetch_err:
-            st.error(f"xlsx error: {st.session_state.xlsx_fetch_err}")
-        if st.session_state.xlsx_last_sha:
-            st.caption(f"SHA: {st.session_state.xlsx_last_sha[:12]}…")
-
-    with dc2:
-        st.markdown("**📊 Parsed Data**")
-        _mcc_c = sum(1 for c in _all_c if c.get("region") == "MCC")
-        _cs_c  = sum(1 for c in _all_c if c.get("region") == "CS")
-        _unk_c = len(_all_c) - _mcc_c - _cs_c
-        st.markdown(f"""
-        | Metric | Value |
-        |--------|-------|
-        | Total cases | **{len(_all_c)}** |
-        | MCC region | {_mcc_c} |
-        | CS region | {_cs_c} |
-        | Unknown region | {_unk_c} |
-        | Weeks parsed | {len(_all_w)} |
-        """)
-        if _all_c:
-            _dates = sorted(set(c["date"] for c in _all_c))
-            st.caption(f"Date range: {_dates[0]} → {_dates[-1]}")
-        if _all_w:
-            _mths = sorted(set(w["month_key"] for w in _all_w))
-            st.caption(f"Months: {', '.join(_mths)}")
-
-    with dc3:
-        st.markdown("**📦 Batch History**")
-        _bh = st.session_state.batch_history
-        if _bh:
-            _mcc_del = st.session_state.delivered_ids.get("MCC", set())
-            _cs_del  = st.session_state.delivered_ids.get("CS",  set())
-            _mcc_b   = len(_bh.get("MCC", []))
-            _cs_b    = len(_bh.get("CS",  []))
-            st.markdown(f"""
-            | Region | Batches | Delivered IDs |
-            |--------|---------|--------------|
-            | MCC | {_mcc_b} | {len(_mcc_del)} |
-            | CS  | {_cs_b} | {len(_cs_del)} |
-            """)
-            _mcc_list = _bh.get("MCC", [])
-            _cs_list  = _bh.get("CS",  [])
-            for b in sorted(_mcc_list + _cs_list,
-                            key=lambda x: x.get("batch_number", 0)):
-                st.caption(
-                    f"#{b.get('batch_number','?')} "
-                    f"{b.get('region','?')} · "
-                    f"{b.get('delivery_date','?')} · "
-                    f"{b.get('total_cases','?')} cases")
-        else:
-            st.info("No batch history loaded.")
-
-    # Live filter trace — shows current tab/week/date filter state
-    st.markdown("---")
-    st.markdown("**🔎 Current Filter State** (live)")
-    _cur_view = st.session_state.view
-    _cur_tab  = st.session_state.tab
-    _ci = st.session_state.current_week_idx
-    _pi = st.session_state.prev_week_idx
-    _sel_i = _pi if _cur_view == "prev" else _ci
-    _sw = _all_w[_sel_i] if _all_w and _sel_i < len(_all_w) else {}
-
-    import calendar as _cal_dbg
-    _mk = _sw.get("month_key", "—")
-    _wn = _sw.get("week_num", "—")
-    if _mk and _mk != "—" and isinstance(_wn, int):
-        _y2, _m2 = int(_mk[:4]), int(_mk[5:])
-        _ws2, _we2 = _calc_week_dates(_y2, _m2, _wn)
-    else:
-        _ws2 = _we2 = "—"
-
-    # Count cases at each filter stage for the current tab
-    _rc = sum(1 for c in _all_c
-              if c.get("region") == _cur_tab and
-              c.get("country") in
-              set(ct for g in DEFAULT_REGIONS[_cur_tab]["groups"] for ct in g["countries"]))
-    _wc = sum(1 for c in _all_c
-              if c.get("region") == _cur_tab and
-              c.get("country") in
-              set(ct for g in DEFAULT_REGIONS[_cur_tab]["groups"] for ct in g["countries"]) and
-              _ws2 != "—" and _ws2 <= c.get("date","") <= _we2)
-
-    st.markdown(f"""
-    | Key | Value |
-    |-----|-------|
-    | Active tab | **{_cur_tab}** |
-    | View | **{_cur_view}** |
-    | sel_week index | {_sel_i} (cur={_ci}, prev={_pi}) |
-    | sel_week month | {_mk} · Week {_wn} |
-    | Calendar window | **{_ws2}** → **{_we2}** |
-    | r_data (region filter) | **{_rc}** cases |
-    | w_data (date filter) | **{_wc}** cases |
-    | wk_dropdown state | `{st.session_state.get("wk_dropdown","—")}` |
-    | _reset_wk_dropdown | {st.session_state.get("_reset_wk_dropdown", False)} |
-    """)
-
-# ─────────────────────────────────────────────────────────────────────────────
 # CONTROLS  —  REFRESH  +  VIEW SELECTOR
 # ─────────────────────────────────────────────────────────────────────────────
 all_weeks = st.session_state.all_weeks
@@ -1321,10 +1207,13 @@ region_countries = _default_ctrs | _extra_ctrs
 if not r_data.empty:
     r_data = r_data[r_data["country"].isin(region_countries)]
 
-# ── w_data: STRICT calendar-date filter ──────────────────────────────────────
-# RULE: the view label (e.g. "May 4–8") defines the EXACT date window shown.
-# Cases worked before/after that window do NOT belong to this view, even if
-# they are in the same column group in the xlsx.
+# ── w_data: filter by batch-week assignment (column position in xlsx) ───────────
+# Cases are assigned to a batch week by their COLUMN GROUP position in the xlsx,
+# stored as week_num + month_key during parsing. This is the authoritative scope.
+# Filtering by calendar date excludes cases entered slightly before/after the
+# calendar Mon–Fri window (e.g. batch W4 work done on May 19–24, delivered May 27)
+# and would produce 0 results for valid historical weeks.
+# Full-month view uses calendar boundaries to stay within the selected month.
 if view_is_month:
     # Full month: all cases with dates inside the calendar month (May 1–31)
     w_data = r_data[
@@ -1332,11 +1221,11 @@ if view_is_month:
         (r_data["date"] <= month_end_str)
     ] if not r_data.empty else pd.DataFrame()
 else:
-    # Week view: ONLY cases dated within the calendar week (Mon–Fri)
+    # Week view: all cases assigned to this batch week by column position
     w_data = r_data[
-        (r_data["date"] >= week_start_str) &
-        (r_data["date"] <= week_end_str)
-    ] if not r_data.empty and week_start_str and week_end_str else pd.DataFrame()
+        (r_data["week_num"]  == sel_week["week_num"]) &
+        (r_data["month_key"] == sel_week["month_key"])
+    ] if not r_data.empty else pd.DataFrame()
 
 # m_data: same month boundary, used for "month total" shown on week-view cards
 m_data = r_data[
@@ -1484,8 +1373,18 @@ if view_is_month:
             total=wk_total,
         ))
 else:
-    # Week view: exactly Mon–Fri of the selected calendar week (always 5 days)
-    w_days  = _build_w_days(week_start_str, week_end_str)
+    # Week view: build daily bars from the actual date range of w_data cases.
+    # Using calendar week boundaries would produce empty bars when cases were
+    # worked on dates slightly outside the Mon–Fri window.
+    if not w_data.empty:
+        _actual_start = w_data["date"].min()
+        _actual_end   = w_data["date"].max()
+        w_days = _build_w_days(_actual_start, _actual_end)
+    elif week_start_str and week_end_str:
+        # No cases yet — show empty calendar week as placeholder
+        w_days = _build_w_days(week_start_str, week_end_str)
+    else:
+        w_days = []
     w_weeks = []  # not used in week view
 
 # ─────────────────────────────────────────────────────────────────────────────

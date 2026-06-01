@@ -83,7 +83,12 @@ for k, v in [
     ("current_week_idx", 0),
     ("prev_week_idx",    0),
     ("view",             "current"),   # "prev" | "current"
-    ("tab",              "MCC"),
+    ("_daily_rpt_bytes",  None),
+    ("_daily_rpt_date",   None),
+    ("_weekly_rpt_bytes", None),
+    ("_gen_daily",        False),
+    ("_gen_weekly",       False),
+    ("_rpt_error",        None),
     ("dark",             True),
     ("rcfg",             copy.deepcopy(DEFAULT_REGIONS)),
     ("_prev_dark",       None),
@@ -2159,78 +2164,101 @@ st.markdown(
     unsafe_allow_html=True)
 
 # Build disq_data for current tab + date scope
-disq_df_all = pd.DataFrame(st.session_state.all_disq_cases) if st.session_state.all_disq_cases else pd.DataFrame()
+disq_df_all = (pd.DataFrame(st.session_state.all_disq_cases)
+               if st.session_state.all_disq_cases else pd.DataFrame())
 if not disq_df_all.empty:
     disq_tab  = disq_df_all[disq_df_all["region"] == tab].copy()
     disq_tab  = disq_tab[disq_tab["country"].isin(region_countries)]
-    disq_week = disq_tab[
-        (disq_tab["date"] >= week_start_str) &
-        (disq_tab["date"] <= week_end_str)
-    ] if week_start_str and week_end_str else pd.DataFrame()
+    disq_week = (disq_tab[(disq_tab["date"] >= week_start_str) &
+                          (disq_tab["date"] <= week_end_str)]
+                 if week_start_str and week_end_str else pd.DataFrame())
 else:
     disq_week = pd.DataFrame()
+
+# ── Run pending report generation (triggered by on_click flags) ───────────────
+if st.session_state._gen_daily:
+    st.session_state._gen_daily   = False
+    st.session_state._rpt_error   = None
+    try:
+        rpt_bytes, rpt_date = generate_daily_report(
+            tab=tab, cfg=cfg,
+            inv_data_df=inv_data,
+            disq_df=disq_week,
+            week_start=week_start_str,
+            week_end=week_end_str,
+            sel_week_label=sel_week["label"],
+            batch_label=batch_label,
+            total_new=total_new, tq=tq,
+            region_countries=region_countries,
+        )
+        st.session_state["_daily_rpt_bytes"]  = rpt_bytes
+        st.session_state["_daily_rpt_date"]   = rpt_date
+        st.session_state["_weekly_rpt_bytes"] = None
+    except Exception as e:
+        st.session_state._rpt_error = f"Daily report failed: {e}"
+
+if st.session_state._gen_weekly:
+    st.session_state._gen_weekly  = False
+    st.session_state._rpt_error   = None
+    try:
+        rpt_bytes = generate_weekly_report(
+            tab=tab, cfg=cfg,
+            inv_data_df=inv_data,
+            disq_df=disq_week,
+            week_start=week_start_str,
+            week_end=week_end_str,
+            sel_week_label=sel_week["label"],
+            batch_label=batch_label,
+            total_new=total_new, tq=tq,
+            w_days=w_days,
+        )
+        st.session_state["_weekly_rpt_bytes"] = rpt_bytes
+        st.session_state["_daily_rpt_bytes"]  = None
+    except Exception as e:
+        st.session_state._rpt_error = f"Weekly report failed: {e}"
+
+# ── Report buttons ─────────────────────────────────────────────────────────────
+def _req_daily():   st.session_state._gen_daily  = True
+def _req_weekly():  st.session_state._gen_weekly = True
 
 rb1, rb2, rb3 = st.columns([1, 1, 3])
 
 with rb1:
-    if st.button("📊 Daily Report", key="btn_daily_rpt",
-                 use_container_width=True, type="secondary"):
-        with st.spinner("Generating daily report…"):
-            rpt_bytes, rpt_date = generate_daily_report(
-                tab=tab, cfg=cfg,
-                inv_data_df=inv_data,
-                disq_df=disq_week,
-                week_start=week_start_str,
-                week_end=week_end_str,
-                sel_week_label=sel_week["label"],
-                batch_label=batch_label,
-                total_new=total_new, tq=tq,
-                region_countries=region_countries,
-            )
-        st.session_state["_daily_rpt_bytes"] = rpt_bytes
-        st.session_state["_daily_rpt_date"]  = rpt_date
-        st.session_state["_weekly_rpt_bytes"] = None
+    st.button("📊 Daily Report", key="btn_daily_rpt",
+              use_container_width=True, type="secondary",
+              on_click=_req_daily,
+              help="Daily snapshot for the most recent worked day in this week")
 
 with rb2:
-    if st.button("📋 Weekly Report", key="btn_weekly_rpt",
-                 use_container_width=True, type="secondary"):
-        with st.spinner("Generating weekly report…"):
-            rpt_bytes = generate_weekly_report(
-                tab=tab, cfg=cfg,
-                inv_data_df=inv_data,
-                disq_df=disq_week,
-                week_start=week_start_str,
-                week_end=week_end_str,
-                sel_week_label=sel_week["label"],
-                batch_label=batch_label,
-                total_new=total_new, tq=tq,
-                w_days=w_days,
-            )
-        st.session_state["_weekly_rpt_bytes"] = rpt_bytes
-        st.session_state["_daily_rpt_bytes"]  = None
+    st.button("📋 Weekly Report", key="btn_weekly_rpt",
+              use_container_width=True, type="secondary",
+              on_click=_req_weekly,
+              help="Full Mon–Fri breakdown for the selected week")
 
-# Show download button once report is ready
+if st.session_state._rpt_error:
+    st.error(st.session_state._rpt_error)
+
+# ── Download buttons appear once report is ready ─────────────────────────────
 _daily_bytes  = st.session_state.get("_daily_rpt_bytes")
 _weekly_bytes = st.session_state.get("_weekly_rpt_bytes")
-_rpt_date     = st.session_state.get("_daily_rpt_date", "")
+_rpt_date     = st.session_state.get("_daily_rpt_date") or ""
 
 if _daily_bytes:
-    fname = f"Ruvixx_Daily_{tab}_{_rpt_date}.xlsx"
     with rb1:
         st.download_button(
-            f"⬇️ Download — {_rpt_date}",
+            label=f"⬇️ Download — {_rpt_date}",
             data=_daily_bytes,
-            file_name=fname,
+            file_name=f"Ruvixx_Daily_{tab}_{_rpt_date}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key="dl_daily", use_container_width=True, type="primary",
         )
-elif _weekly_bytes:
-    fname = f"Ruvixx_Weekly_{tab}_{week_start_str}_{week_end_str}.xlsx"
+
+if _weekly_bytes:
     with rb2:
         st.download_button(
-            f"⬇️ Download — {sel_week['label']}",
+            label=f"⬇️ Download — {sel_week['label']}",
             data=_weekly_bytes,
-            file_name=fname,
+            file_name=f"Ruvixx_Weekly_{tab}_{week_start_str}_{week_end_str}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key="dl_weekly", use_container_width=True, type="primary",
         )

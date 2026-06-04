@@ -225,14 +225,24 @@ def fetch_xlsx_from_github(force=False):
         "Accept":        "application/vnd.github.v3+json",
         "User-Agent":    "Ruvixx-Dashboard",
     }
+    import time
     try:
-        meta_resp = requests.get(meta_url, headers=headers, timeout=20)
-        if meta_resp.status_code == 404:
-            st.session_state.xlsx_fetch_err = (
-                f"File not found: {repo}/{path}. "
-                "Run setupHourlyTrigger() in Apps Script to start pushing the file.")
-            return False
-        if meta_resp.status_code != 200:
+        # Retry once on 401 — Streamlit Community Cloud sometimes fails to load
+        # secrets on the first request after waking from sleep.
+        for _attempt in range(2):
+            meta_resp = requests.get(meta_url, headers=headers, timeout=20)
+            if meta_resp.status_code == 200:
+                break
+            if meta_resp.status_code == 401 and _attempt == 0:
+                time.sleep(3)                              # brief pause
+                token   = st.secrets.get("GITHUB_TOKEN", "")  # re-read secret
+                headers["Authorization"] = f"token {token}"   # refresh header
+                continue
+            if meta_resp.status_code == 404:
+                st.session_state.xlsx_fetch_err = (
+                    f"File not found: {repo}/{path}. "
+                    "Run setupHourlyTrigger() in Apps Script to start pushing the file.")
+                return False
             st.session_state.xlsx_fetch_err = (
                 f"GitHub API error {meta_resp.status_code} fetching xlsx metadata.")
             return False

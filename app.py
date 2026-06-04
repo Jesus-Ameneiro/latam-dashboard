@@ -1198,34 +1198,62 @@ summary_groups = [
 view_label = sel_week["label"]
 
 # ── Batch-history exclusion ───────────────────────────────────────────────────
-# delivered_ids: set of case IDs already shipped in a previous batch.
-# new_w_data   : valid cases NOT yet in any delivered batch = current batch work.
-# Investigator cards always use w_data (full productivity, all valid cases).
+# delivered_ids : case IDs already shipped in any previous batch for this region.
+# Investigator cards use w_data (selected week only — productivity view).
+# Batch progress uses ALL r_data so the donut reflects the true cumulative
+# count of cases ready for the next batch, regardless of which week is shown.
 delivered_ids  = st.session_state.delivered_ids.get(tab, set())
 has_batch_data = st.session_state.batch_fetch_ok
 
+# ── Two-week scope for batch progress ─────────────────────────────────────────
+# Only cases dated within the current week OR the previous week are counted
+# toward the current batch. Cases from older months that were never delivered
+# are excluded to avoid inflating the batch progress numbers.
+_cur_w  = all_weeks[cur_idx]
+_prev_w = all_weeks[prev_idx]
+_scope_start = min(
+    s for s in [_cur_w.get("start"), _prev_w.get("start")] if s
+)
+_scope_end = max(
+    e for e in [_cur_w.get("end"), _prev_w.get("end")] if e
+)
+
+# r_data_scope: region cases within the two-week window
+if not r_data.empty and _scope_start and _scope_end:
+    r_data_scope = r_data[
+        (r_data["date"] >= _scope_start) &
+        (r_data["date"] <= _scope_end)
+    ]
+else:
+    r_data_scope = r_data.copy()
+
+# new_all_data: two-week scope cases not yet in any delivered batch
+new_all_data = (r_data_scope[~r_data_scope["case_id"].isin(delivered_ids)]
+                if not r_data_scope.empty and delivered_ids
+                else r_data_scope.copy())
+
+# w_data-scoped new cases (used for the group breakdown per week context)
 new_w_data = (w_data[~w_data["case_id"].isin(delivered_ids)]
               if not w_data.empty and delivered_ids
               else w_data.copy())
 
-# ── Current batch number: latest delivered batch for this region + 1 ──────────
+# Batch progress totals
+# total_new   = ALL new cases for this region (cumulative current batch)
+# total_deliv = ALL r_data cases already in a previous batch
+# total_all   = selected week valid cases (investigator productivity)
+total_new   = len(new_all_data)    if not new_all_data.empty    else 0
+total_deliv = (len(r_data_scope) - total_new) if not r_data_scope.empty else 0
+total_all   = len(w_data)          if not w_data.empty          else 0
+
+# ── Current batch number: latest delivered batch + 1 ──────────────────────────
 _bh = st.session_state.batch_history or {}
 _region_batches = _bh.get(tab, [])
 if _region_batches and has_batch_data:
-    _last_batch_num = max(b.get("batch_number", 0) for b in _region_batches)
-    current_batch_num = _last_batch_num + 1
+    current_batch_num = max(b.get("batch_number", 0) for b in _region_batches) + 1
     batch_label = f"Batch #{current_batch_num}"
 else:
     current_batch_num = None
     batch_label = "Current Batch"
-
-# ── Batch progress totals ─────────────────────────────────────────────────────
-# total_new   = cases for current batch (not in any delivered batch)
-# total_deliv = cases already in a previous delivered batch
-# total_all   = all valid cases this period (investigator productivity)
-total_new   = len(new_w_data) if not new_w_data.empty else 0
-total_deliv = (len(w_data) - total_new) if not w_data.empty else 0
-total_all   = len(w_data) if not w_data.empty else 0
 
 # Donut = current batch progress vs quota target
 total = total_new
@@ -1236,10 +1264,7 @@ pct   = round(total / tq * 100) if tq else 0
 groups = []
 for g in summary_groups:
     g_countries = set(g["countries"])
-    if not new_w_data.empty:
-        g_new = len(new_w_data[new_w_data["country"].isin(g_countries)])
-    else:
-        g_new = 0
+    g_new = len(new_all_data[new_all_data["country"].isin(g_countries)]) if not new_all_data.empty else 0
     groups.append(dict(
         label=g["label"], quota=g["quota"], eff_quota=g["quota"], done=g_new,
     ))

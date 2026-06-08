@@ -35,11 +35,12 @@ MONTH_MAP = {m: i+1 for i, m in enumerate([
     "july","august","september","october","november","december",
 ])}
 DISQ_RE = re.compile(
-    r"\b(disqualif|disqualified|reject|rjected|duplicad[ao]?|repeated|"
-    r"duplicate\s+of|duplicado|related|case\s+related|already\s+contacted|"
-    r"entity\s+already|caso\s+relacionado|caso\s+duplicado|not\s+valid|"
-    r"no\s+aplica|kasznar|kaznar|attended\s+by\s+kaz|"
-    r"same\s+entity|rjected|repeated\s+case|already\s+processed)\b",
+    r"\b(disqualif|disqualified|reject|rejected|rechazado|rjected|"
+    r"duplicad[ao]?|repeated|duplicate\s+of|duplicado|related|"
+    r"case\s+related|already\s+contacted|entity\s+already|"
+    r"caso\s+relacionado|caso\s+duplicado|not\s+valid|no\s+aplica|"
+    r"kasznar|kaznar|attended\s+by\s+kaz|same\s+entity|"
+    r"repeated\s+case|already\s+processed)\b",
     re.IGNORECASE,
 )
 
